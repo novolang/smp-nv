@@ -1,0 +1,38 @@
+[package]
+name        = "smp-nv"
+version     = "0.0.1"
+description = "The Bluetooth Security Manager Protocol as a state machine that performs nothing: feed it PDUs, entropy and a person's answer, and it returns the actions a host must take.  LE Legacy and LE Secure Connections, the pairing toolbox, and key distribution.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and the `Action` enum is what makes that true rather than
+# aspirational: pairing needs entropy, a person and a radio, and every
+# one of them is a variant this returns instead of an effect it
+# declares.
+layer       = "core"
+
+category    = "networking"
+
+tags        = ["bluetooth", "ble", "smp", "pairing", "bonding", "secure-connections", "sans-io", "security-manager", "embedded"]
+repository  = "https://github.com/novolang/smp-nv"
+maintainers = ["novo-lang"]
+
+[docs.pages]
+"README.md" = "Pairing, without a radio"
+
+[dependencies]
+# The curve, for LE Secure Connections: a local key pair from the
+# entropy the host feeds in, and the ECDH that turns the peer's public
+# key into the DHKey f5 consumes.  A path dependency until both
+# packages have their own repositories.
+p256-nv   = { path = "../p256-nv", version = "^0.0.1" }
+
+# AES-128 and AES-CMAC, which every function in `toolbox` is a
+# composition of.  Both are `core`, so this package stays `core`.
+crypto-nv = "^0.1"

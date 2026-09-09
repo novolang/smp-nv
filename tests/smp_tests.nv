@@ -1,0 +1,304 @@
+// tests/smp_tests.nv — the API tests, written against the signatures.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// smp.<fn>` or `toolbox.<fn>` from the `todo()` that is each body.
+// That is the expected state of an interface release: the compiler has
+// checked every signature, every type and every effect row, and nothing
+// else has been checked because there is nothing else yet.
+//
+// What they assert is the CHOREOGRAPHY — that a host driving this
+// package never has to know anything the protocol did not tell it.
+// Each one walks a step of a pairing and checks that the action it
+// asked for is the one the specification says comes next, so the
+// implementation lane has the sequence written down as executable text
+// rather than as prose in the README.
+
+use std.test
+use smp
+use toolbox
+
+// A peripheral that can show six digits and be told yes or no — the
+// capability that makes Numeric Comparison available under Secure
+// Connections and Just Works under legacy.
+fn display_peripheral() -> Features
+    Features {
+        bonding: true,
+        mitm: true,
+        secure_connections: true,
+        keypress: false,
+        ct2: false,
+        oob: false,
+        max_key_size: 16,
+        initiator_keys: KeyDistribution { enc: false, id: true, sign: false, link: false },
+        responder_keys: KeyDistribution { enc: true, id: true, sign: false, link: false } }
+
+// A headless sensor: nothing to show, nothing to type.
+fn silent_peripheral() -> Features
+    Features {
+        bonding: false,
+        mitm: false,
+        secure_connections: false,
+        keypress: false,
+        ct2: false,
+        oob: false,
+        max_key_size: 16,
+        initiator_keys: KeyDistribution { enc: false, id: false, sign: false, link: false },
+        responder_keys: KeyDistribution { enc: true, id: false, sign: false, link: false } }
+
+// The opcode byte of a PDU.
+//
+// This exists because `pdu[0]` cannot be written directly in the match
+// arm that binds it: indexing a list bound from an enum variant's
+// payload is an E6000 internal compiler error on the compiled leg,
+// filed from this lane as
+// `indexing-a-match-bound-enum-payload-list-is-an-ice`.  Passing the
+// binding through an annotated parameter is the workaround the filing
+// records, and this is it.  When that lands, every call below becomes
+// `pdu[0] as Int` again.
+fn opcode_of(pdu: [u8]) -> Int
+    pdu[0] as Int
+
+fn zeros(n: Int) -> [u8]
+    var b: [u8] = []
+    for _i in 0..n
+        b = list.append(b, [0 as u8])
+    b
+
+@test
+fn test_a_users_rejection_ends_the_procedure()
+    // Numeric Comparison the person said no to is a reason going out,
+    // not a silent stop: the peer is waiting and is owed one.
+    let s = smp.new(Responder, display_peripheral(), DisplayYesNo)
+    let step = smp.feed_user(s, Rejected)
+    var failed = false
+    for i in 0..list.len(step.actions)
+        match step.actions[i]
+            Failed(_) =>
+                failed = true
+            _         => test.assert(true)
+    test.assert(failed)
+
+@test
+fn test_a_passkey_nobody_asked_for_is_not_a_step()
+    let s = smp.new(Responder, display_peripheral(), KeyboardOnly)
+    let step = smp.feed_user(s, Passkey(123456))
+    match smp.state(step.smp)
+        Failed(_) => test.assert(true)
+        _         => test.fail("a passkey before a Confirm is out of order")
+
+@test
+fn test_key_distribution_waits_for_the_link_to_be_encrypted()
+    // The host starts encryption and must SAY so; one that starts it and
+    // stays quiet leaves the peer waiting for keys that never come.
+    // Reported out of order, it stops rather than advancing.
+    let s = smp.new(Responder, display_peripheral(), DisplayYesNo)
+    let step = smp.feed_link_encrypted(s)
+    match smp.state(step.smp)
+        Failed(_) => test.assert(true)
+        _         => test.fail("an encryption report nobody asked for is out of order")
+
+@test
+fn test_the_channel_is_the_one_the_specification_names()
+    // Real today: SMP is CID 0x0006 and always has been.
+    test.assert_eq(smp.CID, 0x0006)
+
+@test
+fn test_a_fresh_state_machine_is_idle_and_has_chosen_nothing()
+    let s = smp.new(Responder, silent_peripheral(), NoInputNoOutput)
+    match smp.state(s)
+        Idle => test.assert(true)
+        _    => test.fail("a state machine that has not started is Idle")
+    match smp.method(s)
+        None    => test.assert(true)
+        Some(_) => test.fail("the method depends on what the peer says")
+    test.assert_eq(smp.is_authenticated(s), false)
+
+@test
+fn test_a_responder_that_begins_asks_to_be_paired_with()
+    // A peripheral cannot pair on its own authority; Security_Request
+    // is how it asks.
+    let s = smp.new(Responder, silent_peripheral(), NoInputNoOutput)
+    let step = smp.begin(s)
+    test.assert_eq(list.len(step.actions), 1)
+    match step.actions[0]
+        Send(pdu) => test.assert_eq(opcode_of(pdu), 0x0B)
+        _         => test.fail("begin on a responder emits a Security_Request")
+
+@test
+fn test_an_initiator_that_begins_sends_a_pairing_request()
+    let s = smp.new(Initiator, silent_peripheral(), NoInputNoOutput)
+    let step = smp.begin(s)
+    match step.actions[0]
+        Send(pdu) => test.assert_eq(opcode_of(pdu), 0x01)
+        _         => test.fail("begin on an initiator emits a Pairing_Request")
+
+@test
+fn test_a_pairing_request_is_answered_and_entropy_is_asked_for()
+    // The responder answers the request, and then needs a nonce before
+    // it can compute a confirm value.  It never draws one itself — that
+    // is the `[rand]` this package does not have, and the reason
+    // NeedRandom is a variant rather than an effect.
+    let s = smp.new(Responder, silent_peripheral(), NoInputNoOutput)
+    let req = smp.encode_pdu(PairingRequest(silent_peripheral(), NoInputNoOutput))
+    let step = smp.feed(s, req)
+    var answered = false
+    var asked = false
+    for i in 0..list.len(step.actions)
+        match step.actions[i]
+            Send(pdu)     =>
+                answered = true
+            NeedRandom(n) =>
+                asked = true
+                test.assert_eq(n, 16)
+            _             => test.assert(true)
+    test.assert(answered)
+    test.assert(asked)
+
+@test
+fn test_two_no_input_no_output_devices_get_just_works()
+    let s = smp.new(Responder, silent_peripheral(), NoInputNoOutput)
+    let req = smp.encode_pdu(PairingRequest(silent_peripheral(), NoInputNoOutput))
+    let step = smp.feed(s, req)
+    match smp.method(step.smp)
+        None    => test.fail("both sides have spoken, so the method is decided")
+        Some(m) =>
+            match m
+                JustWorks => test.assert(true)
+                _         => test.fail("nothing to show and nothing to type is Just Works")
+    // And Just Works is not authentication, however loudly either side
+    // asked for MITM.
+    test.assert_eq(smp.is_authenticated(step.smp), false)
+
+@test
+fn test_an_unknown_opcode_is_answered_rather_than_refused()
+    // The peer is owed an answer, so a PDU this package cannot read
+    // produces a Pairing_Failed to send AND the Failed action — not an
+    // error the caller has to turn into a PDU itself.
+    let s = smp.new(Responder, silent_peripheral(), NoInputNoOutput)
+    let step = smp.feed(s, [0x7F as u8, 0x00 as u8])
+    var sent = false
+    var failed = false
+    for i in 0..list.len(step.actions)
+        match step.actions[i]
+            Send(pdu) =>
+                sent = true
+                test.assert_eq(opcode_of(pdu), 0x05)
+            Failed(r) =>
+                failed = true
+                match r
+                    CommandNotSupported => test.assert(true)
+                    _                   => test.fail("an opcode nobody knows is CommandNotSupported")
+            _         => test.assert(true)
+    test.assert(sent)
+    test.assert(failed)
+    // …and the Send comes first, because a device that told itself
+    // pairing ended before putting the PDU on the air owes the peer a
+    // packet it will never get.
+    match step.actions[0]
+        Send(_) => test.assert(true)
+        _       => test.fail("the Pairing_Failed PDU precedes the Failed action")
+
+@test
+fn test_aborting_tells_the_peer_and_then_stops()
+    let s = smp.new(Responder, silent_peripheral(), NoInputNoOutput)
+    let step = smp.abort(s, UnspecifiedReason)
+    match step.actions[0]
+        Send(pdu) => test.assert_eq(opcode_of(pdu), 0x05)
+        _         => test.fail("abort emits Pairing_Failed first")
+    match smp.state(step.smp)
+        Failed(_) => test.assert(true)
+        _         => test.fail("after abort the procedure is over")
+
+@test
+fn test_a_pairing_failed_pdu_round_trips_through_its_reason()
+    let wire = smp.encode_pdu(PairingFailed(ConfirmValueFailed))
+    test.assert_eq(list.len(wire), 2)
+    test.assert_eq(wire[0] as Int, 0x05)
+    test.assert_eq(wire[1] as Int, 0x04)
+    match smp.decode_pdu(wire)
+        Err(_)  => test.fail("what encode wrote, decode reads")
+        Ok(pdu) =>
+            match pdu
+                PairingFailed(r) =>
+                    match r
+                        ConfirmValueFailed => test.assert(true)
+                        _                  => test.fail("reason 0x04 is ConfirmValueFailed")
+                _                => test.fail("opcode 0x05 is Pairing_Failed")
+
+@test
+fn test_a_decode_failure_is_the_reason_the_peer_is_owed()
+    // The error channel and the wire format are the same enum on
+    // purpose: a decode that failed has already worked out what to send
+    // back.
+    match smp.decode_pdu([0x03 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("a Pairing_Confirm is 17 bytes, not 2")
+        Err(r) =>
+            match r
+                InvalidParameters => test.assert(true)
+                _                 => test.fail("a wrong-length PDU is InvalidParameters")
+
+@test
+fn test_an_empty_pdu_is_not_a_command()
+    match smp.decode_pdu([])
+        Ok(_)  => test.fail("no bytes is no opcode")
+        Err(_) => test.assert(true)
+
+@test
+fn test_a_pairing_confirm_carries_sixteen_bytes()
+    let wire = smp.encode_pdu(PairingConfirm(zeros(16)))
+    test.assert_eq(list.len(wire), 17)
+    test.assert_eq(wire[0] as Int, 0x03)
+    test.assert_eq(smp.pdu_opcode(PairingRandom(zeros(16))), 0x04)
+
+@test
+fn test_a_legacy_procedure_has_no_peer_public_key()
+    let s = smp.new(Responder, silent_peripheral(), NoInputNoOutput)
+    match smp.peer_public_key(s)
+        None    => test.assert(true)
+        Some(_) => test.fail("LE Legacy pairing exchanges no public keys")
+
+@test
+fn test_short_entropy_stops_the_procedure_rather_than_continuing()
+    // A pairing that continued on fewer bytes than it asked for would
+    // be worse than one that stopped.
+    let s = smp.new(Responder, silent_peripheral(), NoInputNoOutput)
+    let step = smp.feed_random(s, zeros(4))
+    var failed = false
+    for i in 0..list.len(step.actions)
+        match step.actions[i]
+            Failed(_) =>
+                failed = true
+            _         => test.assert(true)
+    test.assert(failed)
+
+@test
+fn test_the_toolbox_blocks_are_sixteen_bytes_wide()
+    // c1, s1, f4, f6 and the two halves of f5 are all AES-sized, which
+    // is what lets them compose without a length argument anywhere.
+    test.assert_eq(list.len(toolbox.c1(zeros(16), zeros(16), zeros(16), zeros(16))), 16)
+    test.assert_eq(list.len(toolbox.s1(zeros(16), zeros(16), zeros(16))), 16)
+    test.assert_eq(list.len(toolbox.f4(zeros(32), zeros(32), zeros(16), 0)), 16)
+    test.assert_eq(list.len(toolbox.f5_mackey(zeros(32), zeros(16), zeros(16), zeros(7), zeros(7))), 16)
+    test.assert_eq(list.len(toolbox.f5_ltk(zeros(32), zeros(16), zeros(16), zeros(7), zeros(7))), 16)
+    test.assert_eq(list.len(toolbox.f6(zeros(16), zeros(16), zeros(16), zeros(16), zeros(3), zeros(7), zeros(7))),
+        16)
+    test.assert_eq(list.len(toolbox.h6(zeros(16), zeros(4))), 16)
+    test.assert_eq(list.len(toolbox.h7(zeros(16), zeros(16))), 16)
+
+@test
+fn test_the_c1_blocks_are_assembled_to_sixteen_bytes()
+    test.assert_eq(list.len(toolbox.build_c1_p1(zeros(7), zeros(7), 0, 1)), 16)
+    test.assert_eq(list.len(toolbox.build_c1_p2(zeros(6), zeros(6))), 16)
+
+@test
+fn test_ah_is_three_bytes_because_a_prand_hash_is()
+    // The one function in the toolbox that is not AES-sized: `ah`
+    // returns the low 24 bits, which is what fits in a resolvable
+    // private address beside its prand.
+    test.assert_eq(list.len(toolbox.ah(zeros(16), zeros(3))), 3)
+
+@test
+fn test_numeric_comparison_is_six_digits()
+    let v = toolbox.g2(zeros(32), zeros(32), zeros(16), zeros(16))
+    test.assert(v >= 0)
+    test.assert(v <= 999999)

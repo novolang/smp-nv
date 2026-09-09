@@ -1,0 +1,94 @@
+// tests/embedded_probe.nv — the package's device claim, as a program
+// that either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules its
+// `use` lines reach into a package of their own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.  Pairing is the one
+// piece of a BLE stack that MUST run on the peripheral — it is what the
+// peripheral does before it will talk to a phone — so a Security
+// Manager that could not compile for a device would not be worth
+// splitting out.
+//
+// It BUILDS; it does not run.  Every function it calls is a `todo()`
+// today.  What is being checked is the tier: `--target=nrf52-qemu`
+// stamps `@tier(embedded)` on every function it compiles, so the
+// checker walks both modules and refuses a `Str` concatenation, a
+// `Bytes` call or an unbounded `while` wherever the implementation
+// later puts one.
+//
+// It calls the toolbox rather than the state machine.  Two reasons, and
+// both are recorded rather than convenient: this file is compiled
+// WITHOUT the package's dependencies, because the scratch package the
+// audit builds declares none, so anything reaching `p256` cannot be
+// here; and the toolbox is where the arithmetic is, which is what a
+// tier check is for.
+
+// ── WHY THIS DOES NOT BUILD TODAY, AND WHY IT STAYS ────────────────
+//
+// It fails on its own first four lines:
+//
+//   tier error: function 'zeros16' is @tier(embedded) but constructs a
+//   list literal — implicit heap allocation is not allowed at this tier
+//   [E4000]
+//
+// That is not an accident of this file.  Every function in `toolbox`
+// takes and returns `[u8]`, and `[u8]` is a heap list that
+// `@tier(embedded)` forbids, so there is no way to CALL this package
+// from a device without allocating — and therefore no probe that both
+// exercises it and passes.  The interface's own shape is what fails,
+// not the probe.
+//
+// crypto-nv is the one published `core` package that makes the device
+// claim and keeps it, and how it does so is the answer this one has
+// not adopted: `pub @value struct Block` with `w: [Int; 16]`, a true
+// inline array laid out in the struct itself (SPEC § 14.4), on the
+// stack, with no header and no cell.  Every function in this toolbox is
+// fixed-width — 16 bytes for a block, 32 for a public-key coordinate, 7
+// for an address, 3 for a prand — so the same treatment applies
+// throughout, and it would make half the tests below unnecessary
+// because a width could no longer be wrong.
+//
+// It is not adopted here because it is a redesign of the interface
+// rather than a fix to the probe, and this release exists to surface
+// exactly that kind of question while it is still cheap to answer.  The
+// milestone review decides; `0.0.x` is where it gets decided.
+//
+// This file therefore stays as it is, red, naming the reason.
+
+use toolbox
+
+// Sixteen bytes, built the way firmware would build them.
+fn zeros16() -> [u8]
+    var b: [u8] = []
+    for _i in 0..16
+        b = list.append(b, [0 as u8])
+    b
+
+fn main() [hw]
+    let z = zeros16()
+
+    // Legacy: the confirm value and the short-term key.
+    let p1 = toolbox.build_c1_p1(z, z, 0, 1)
+    let p2 = toolbox.build_c1_p2(z, z)
+    let confirm = toolbox.c1(z, z, p1, p2)
+    let stk = toolbox.s1(z, z, z)
+
+    // Secure Connections: the confirm value and the two f5 halves.
+    let sc_confirm = toolbox.f4(z, z, z, 0)
+    let mackey = toolbox.f5_mackey(z, z, z, z, z)
+    let ltk = toolbox.f5_ltk(z, z, z, z, z)
+    let check = toolbox.f6(mackey, z, z, z, z, z, z)
+
+    // Numeric Comparison returns an Int rather than a block, which is
+    // the one shape in the toolbox the backend lowers differently.
+    let digits = toolbox.g2(z, z, z, z)
+
+    if list.len(confirm) == 16 and list.len(stk) == 16
+        hal.uart.write("smp-nv: legacy toolbox\n")
+    if list.len(sc_confirm) == 16 and list.len(ltk) == 16
+        hal.uart.write("smp-nv: secure connections toolbox\n")
+    if list.len(check) == 16 and digits >= 0
+        hal.uart.write("smp-nv: dhkey check and comparison\n")

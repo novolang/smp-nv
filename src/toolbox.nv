@@ -1,0 +1,126 @@
+// toolbox — the SMP cryptographic toolbox, Core Vol 3 Part H § 2.2.
+//
+// Every body is a `todo()`.  The signatures are the design; see the
+// README for the stamp.
+//
+// These nine functions are what the Bluetooth specification calls the
+// cryptographic toolbox: AES-CMAC and AES-128 compositions with
+// Bluetooth's own key identifiers, salts, counters and byte orders
+// baked in.  They are in THIS package and not in crypto-nv for one
+// reason — a reader who has never opened the Core Specification has no
+// use for `f5`, while AES-CMAC serves anyone.  A function goes where
+// its specification is.
+//
+// Byte order is the specification's throughout, which for SMP means
+// LSB-first for addresses and nonces and MSB-first for the AES block.
+// The Core Spec's own § D vectors are the tests, and the implementation
+// lane should take them from there rather than from another stack.
+//
+// Every function is total: it has no error channel because none of them
+// can fail on inputs of the right width, and a width mismatch is a
+// caller bug rather than a peer's.  The widths are in each doc comment.
+
+// The confirm value of LE Legacy pairing (§ 2.2.3).
+//
+//     c1(k, r, p1, p2) = AES_k(AES_k(r ⊕ p1) ⊕ p2)
+//
+// `k` is the 16-byte temporary key — all zeroes for Just Works — `r` is
+// the 16-byte nonce, and `p1` / `p2` are the 16-byte blocks
+// `build_c1_p1` and `build_c1_p2` assemble.  Returns 16 bytes.
+pub fn c1(k: [u8], r: [u8], p1: [u8], p2: [u8]) -> [u8]
+    todo("toolbox.c1")
+
+// The `p1` block of c1: `pres ‖ preq ‖ rat ‖ iat`.
+//
+// `pres` and `preq` are the whole 7-byte Pairing_Response and
+// Pairing_Request PDUs, opcode included.  `rat` and `iat` are the
+// responder's and initiator's address types, 0 for public and 1 for
+// random.  Returns 16 bytes.
+pub fn build_c1_p1(pres: [u8], preq: [u8], rat: Int, iat: Int) -> [u8]
+    todo("toolbox.build_c1_p1")
+
+// The `p2` block of c1: four zero bytes, then `ia ‖ ra`.
+//
+// `ia` and `ra` are the 6-byte initiator and responder addresses,
+// LSB-first as BLE carries them.  Returns 16 bytes.
+pub fn build_c1_p2(ia: [u8], ra: [u8]) -> [u8]
+    todo("toolbox.build_c1_p2")
+
+// The short-term key of LE Legacy pairing (§ 2.2.4).
+//
+//     s1(k, r1, r2) = AES_k(r1[63:0] ‖ r2[63:0])
+//
+// Only the LOW eight bytes of each 16-byte nonce are used, `r1`'s in
+// the low half of the block.  Returns 16 bytes.
+pub fn s1(k: [u8], r1: [u8], r2: [u8]) -> [u8]
+    todo("toolbox.s1")
+
+// The random-address hash of § 2.2.2, which is what resolves a
+// resolvable private address.
+//
+//     ah(irk, r) = AES_irk(padding ‖ r)[23:0]
+//
+// `irk` is 16 bytes, `r` is the 3-byte prand.  Returns 3 bytes.
+pub fn ah(irk: [u8], r: [u8]) -> [u8]
+    todo("toolbox.ah")
+
+// The confirm value of LE Secure Connections (§ 2.2.6).
+//
+//     f4(u, v, x, z) = AES-CMAC_x(u ‖ v ‖ z)
+//
+// `u` and `v` are 32-byte public-key X coordinates, `x` is the 16-byte
+// nonce, and `z` is one byte — zero for Just Works and Numeric
+// Comparison, and one passkey bit for Passkey Entry.  Returns 16 bytes.
+pub fn f4(u: [u8], v: [u8], x: [u8], z: Int) -> [u8]
+    todo("toolbox.f4")
+
+// The MacKey half of the LE Secure Connections key derivation
+// (§ 2.2.7), which is f5 at counter 0.
+//
+// `w` is the 32-byte DHKey from ECDH, `n1` and `n2` are the two 16-byte
+// nonces, and `a1` and `a2` are the two 7-byte addresses — the address
+// type byte followed by the six address bytes.  Returns 16 bytes.
+pub fn f5_mackey(w: [u8], n1: [u8], n2: [u8], a1: [u8], a2: [u8]) -> [u8]
+    todo("toolbox.f5_mackey")
+
+// The LTK half of the LE Secure Connections key derivation (§ 2.2.7),
+// which is f5 at counter 1.
+//
+// Same arguments as `f5_mackey`, and the two differ only by that
+// counter byte.  Returns 16 bytes.
+pub fn f5_ltk(w: [u8], n1: [u8], n2: [u8], a1: [u8], a2: [u8]) -> [u8]
+    todo("toolbox.f5_ltk")
+
+// The DHKey check value of LE Secure Connections (§ 2.2.8).
+//
+//     f6(w, n1, n2, r, iocap, a1, a2) = AES-CMAC_w(n1 ‖ n2 ‖ r ‖ iocap ‖ a1 ‖ a2)
+//
+// `w` is the 16-byte MacKey, `r` is 16 bytes, `iocap` is the 3-byte
+// AuthReq ‖ OOB ‖ IO-capability triple, and `a1` / `a2` are the 7-byte
+// addresses.  Returns 16 bytes.
+pub fn f6(w: [u8], n1: [u8], n2: [u8], r: [u8], iocap: [u8], a1: [u8], a2: [u8]) -> [u8]
+    todo("toolbox.f6")
+
+// The six digits a user compares in Numeric Comparison (§ 2.2.9).
+//
+//     g2(u, v, x, y) = AES-CMAC_x(u ‖ v ‖ y) mod 10^6
+//
+// `u` and `v` are the 32-byte public-key X coordinates and `x` / `y`
+// are the two 16-byte nonces.  Returns a number in `0 ..= 999999`,
+// which the caller displays with leading zeroes.
+pub fn g2(u: [u8], v: [u8], x: [u8], y: [u8]) -> Int
+    todo("toolbox.g2")
+
+// The link-key conversion of § 2.2.10, used by cross-transport key
+// derivation.
+//
+// `w` is the 16-byte key and `key_id` is 4 bytes.  Returns 16 bytes.
+pub fn h6(w: [u8], key_id: [u8]) -> [u8]
+    todo("toolbox.h6")
+
+// The salted key conversion of § 2.2.11, which is what the CT2 bit in
+// AuthReq selects over h6.
+//
+// `salt` and `w` are both 16 bytes.  Returns 16 bytes.
+pub fn h7(salt: [u8], w: [u8]) -> [u8]
+    todo("toolbox.h7")

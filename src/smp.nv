@@ -1,0 +1,358 @@
+// smp — the Bluetooth Security Manager Protocol, as a state machine
+// that performs nothing.
+//
+// Every body is a `todo()`.  The signatures and the effect rows are the
+// design, and the compiler checks them as claims; see the README for
+// the stamp.
+//
+// Core Vol 3 Part H.  SMP rides over L2CAP on CID 0x0006 and pairs two
+// devices: it negotiates a method, exchanges confirms and nonces,
+// derives a key, and distributes whatever the two sides agreed to
+// distribute.  All of that is arithmetic and bookkeeping, and none of
+// it touches a radio — which is why it can be a package rather than a
+// layer of a stack.
+//
+// The whole surface is `[]`.  Pairing needs randomness, a clock and a
+// link, and this package asks for none of them: it ASKS, through
+// `Action`, and the host does it and feeds the answer back.
+
+use p256
+
+// The L2CAP channel identifier SMP runs on (§ 3.1).
+pub const CID = 0x0006
+
+// Which side of the pairing this instance is.
+//
+// The initiator is the central that sends Pairing_Request; the
+// responder is the peripheral that answers.  A peripheral may ask to be
+// paired with by sending a Security_Request, which `begin` does for a
+// responder, but it is still the responder.
+pub enum Role
+    Initiator
+    Responder
+
+// What the device can show and what it can be told (§ 3.3.2).
+//
+// Together with the peer's, this decides the pairing method, which is
+// why `method` can only be answered after a Pairing_Response has been
+// exchanged.
+pub enum IoCapability
+    DisplayOnly
+    DisplayYesNo
+    KeyboardOnly
+    NoInputNoOutput
+    KeyboardDisplay
+
+// Which keys a side offers to distribute (§ 3.6.1).
+//
+// `link` is the BR/EDR cross-transport link key; a device with no
+// BR/EDR radio leaves it false.
+pub struct KeyDistribution
+    enc: Bool
+    id: Bool
+    sign: Bool
+    link: Bool
+
+// What this device asks for in a Pairing_Request or Response.
+//
+// `max_key_size` is in octets, 7 to 16; the two sides take the smaller,
+// and a peer that asks for less than this device's own minimum gets
+// `EncryptionKeySize`.  `secure_connections` is the SC bit of AuthReq
+// and is what chooses between the two pairing families below.
+pub struct Features
+    bonding: Bool
+    mitm: Bool
+    secure_connections: Bool
+    keypress: Bool
+    ct2: Bool
+    oob: Bool
+    max_key_size: Int
+    initiator_keys: KeyDistribution
+    responder_keys: KeyDistribution
+
+// The pairing method the two sides' capabilities selected (§ 2.3.5.1).
+//
+// `NumericComparison` exists only under LE Secure Connections; a legacy
+// pairing between two displays gets `JustWorks` instead, which is the
+// reason SC is worth having.
+pub enum Method
+    JustWorks
+    PasskeyEntry
+    NumericComparison
+    OutOfBand
+
+// Why pairing stopped, in the specification's own codes (§ 3.5.5).
+//
+// These are the values a Pairing_Failed PDU carries, so this enum is
+// both this package's error type and part of the wire format.  That is
+// deliberate: a decode that fails has, by construction, already worked
+// out what to send back.
+pub enum Failure
+    PasskeyEntryFailed
+    OobNotAvailable
+    AuthenticationRequirements
+    ConfirmValueFailed
+    PairingNotSupported
+    EncryptionKeySize
+    CommandNotSupported
+    UnspecifiedReason
+    RepeatedAttempts
+    InvalidParameters
+    DhKeyCheckFailed
+    NumericComparisonFailed
+    BrEdrPairingInProgress
+    CrossTransportKeyNotAllowed
+    KeyRejected
+
+// What went wrong, in words, for a caller that logs rather than
+// branches.
+//
+// `Result<_, Failure>` requires it: SPEC § 3.4 admits a `Result` error
+// type only if it implements `Error`.
+impl Error for Failure
+    fn message(self) -> Str
+        todo("smp.Failure.message")
+
+// The key material one side distributed to the other (§ 3.6).
+//
+// Every field is optional because what arrives is what the two sides
+// negotiated: an LE Secure Connections bond distributes no LTK at all,
+// because both sides derived the same one from f5 and there is nothing
+// to send.  `ediv` and `rand` are legacy's way of naming a stored LTK
+// and are absent under SC for the same reason.
+pub struct Keys
+    ltk: ?[u8]
+    ediv: ?Int
+    rand: ?[u8]
+    irk: ?[u8]
+    identity_address: ?[u8]
+    identity_address_type: ?Int
+    csrk: ?[u8]
+
+// What the host must do next.
+//
+// This enum is the whole reason this package can be `core`.  Every
+// effect pairing needs is one of these — a PDU to put on the wire,
+// entropy to draw, a person to ask, a link to encrypt, a bond to write
+// to flash — and the state machine returns them instead of performing
+// them.
+pub enum Action
+    // Put these bytes on L2CAP CID 0x0006.  The PDU is complete,
+    // opcode included, and carries no L2CAP header.
+    Send(pdu: [u8])
+    // Draw this many bytes of entropy and hand them back through
+    // `feed_random`.  The state machine will not advance until they
+    // arrive, and it never draws its own — that is the `[rand]` this
+    // package does not have.
+    NeedRandom(bytes: Int)
+    // Ask the person.  For `NumericComparison` the value is six digits
+    // to display and confirm; for `PasskeyEntry` it is the passkey to
+    // display, or -1 when this side is the one that must type it.
+    // Answer through `feed_user`.
+    Confirm(method: Method, value: Int)
+    // Start link-layer encryption with this key, then report back
+    // through `feed_link_encrypted`.  Under legacy the key is the STK;
+    // under Secure Connections it is the LTK f5 derived.
+    StartEncryption(key: [u8])
+    // Pairing succeeded and this is what to persist against the peer's
+    // identity.  A device that does not bond may drop it.
+    StoreKeys(keys: Keys)
+    // Pairing is over and will not resume.  The Pairing_Failed PDU, if
+    // one is owed to the peer, arrives as a `Send` before this.
+    Failed(reason: Failure)
+
+// The person's answer to a `Confirm` action.
+pub enum UserResponse
+    // Numeric Comparison: the values matched.  Out of Band: the data
+    // is available.
+    Confirmed
+    // The person said no, or the confirmation timed out.
+    Rejected
+    // Passkey Entry: the six digits that were typed.
+    Passkey(digits: Int)
+
+// Where the procedure is, for a caller that reports rather than drives.
+//
+// Driving is `feed` and the actions it returns; this is for a status
+// line.  It is deliberately coarser than the internal state machine —
+// a caller that branched on every wire state would be reimplementing
+// the protocol.
+pub enum State
+    // Nothing in progress.  Fresh, or finished, or disconnected.
+    Idle
+    // A pairing procedure is under way and waiting on the peer.
+    Pairing
+    // Waiting for `feed_random`.
+    WaitingForRandom
+    // Waiting for `feed_user`.
+    WaitingForUser
+    // Waiting for `feed_link_encrypted`.
+    Encrypting
+    // The link is encrypted and any agreed keys have been distributed.
+    Bonded
+    // Over.  The reason is the one that was sent or received.
+    Failed(reason: Failure)
+
+// One side's view of a pairing procedure.
+//
+// Opaque, and a VALUE: a caller holds one per connection and this
+// package holds nothing.  Every function that advances it takes one and
+// returns another, so a caller that keeps the old one has a snapshot
+// rather than a dangling handle.
+pub struct Smp
+    // Opaque.  A caller that reaches into this has coupled itself to a
+    // representation that will change when Secure Connections lands.
+    tag: Int
+
+// A state machine and everything the host must do before feeding it
+// again.
+//
+// A struct rather than a tuple for the reason a tuple fails here: its
+// components come out only through `match`, and these two are used in
+// different places — the caller reassigns one and iterates the other.
+//
+// The actions are in the order they must happen.  A `Send` before a
+// `Failed` is the Pairing_Failed PDU the peer is owed, and reordering
+// them puts a device on the air after it has told itself pairing ended.
+pub struct PairingStep
+    smp: Smp
+    actions: [Action]
+
+// ── Driving the procedure ───────────────────────────────────────────
+
+// A state machine that has not started.
+//
+// `features` is what this device will ask for and accept; `io_caps` is
+// what it can show and be told.  Neither can change once pairing has
+// begun, which is why they are here rather than on `begin`.
+pub fn new(role: Role, features: Features, io_caps: IoCapability) -> Smp
+    todo("smp.new")
+
+// Start.
+//
+// An initiator emits a Pairing_Request.  A responder emits a
+// Security_Request, which asks the initiator to start or to encrypt
+// with an existing bond — a peripheral cannot pair on its own
+// authority.  A responder that intends only to answer never calls this.
+pub fn begin(s: Smp) -> PairingStep
+    todo("smp.begin")
+
+// Feed one SMP PDU received on CID 0x0006.
+//
+// `pdu` is the L2CAP payload: the opcode byte and its parameters, with
+// no L2CAP header.  A PDU that does not decode, or that is not legal in
+// the current state, produces a `Send` of Pairing_Failed and a `Failed`
+// rather than a refusal — the peer is owed an answer, and a caller that
+// had to turn a `Result` into that PDU itself would be writing the
+// protocol twice.
+pub fn feed(s: Smp, pdu: [u8]) -> PairingStep
+    todo("smp.feed")
+
+// Feed the entropy a `NeedRandom` asked for.
+//
+// Hand it exactly the number of bytes it asked for, from a source you
+// trust.  Feeding fewer, or feeding when none was asked for, produces
+// a `Failed(UnspecifiedReason)`: a pairing that continued on short
+// entropy would be worse than one that stopped.
+pub fn feed_random(s: Smp, bytes: [u8]) -> PairingStep
+    todo("smp.feed_random")
+
+// Feed the person's answer to a `Confirm`.
+pub fn feed_user(s: Smp, response: UserResponse) -> PairingStep
+    todo("smp.feed_user")
+
+// Report that link-layer encryption started with the key a
+// `StartEncryption` handed over.
+//
+// This is what moves a legacy procedure past the STK and lets key
+// distribution begin, so a host that starts encryption and forgets to
+// say so leaves the peer waiting for keys that never come.
+pub fn feed_link_encrypted(s: Smp) -> PairingStep
+    todo("smp.feed_link_encrypted")
+
+// Give up, telling the peer why.
+//
+// Emits the Pairing_Failed PDU as a `Send` and then a `Failed`.  Legal
+// in any state; from `Idle` it does nothing, because there is nothing
+// to abort.
+pub fn abort(s: Smp, reason: Failure) -> PairingStep
+    todo("smp.abort")
+
+// Where the procedure is.
+pub fn state(s: Smp) -> State
+    todo("smp.state")
+
+// The method the two sides' capabilities selected, once both
+// Pairing_Request and Pairing_Response have been exchanged.
+//
+// `None` before that, because the answer depends on what the peer said
+// and guessing it early is how a stack ends up displaying a passkey for
+// a Just Works pairing.
+pub fn method(s: Smp) -> ?Method
+    todo("smp.method")
+
+// Whether this procedure gives man-in-the-middle protection.
+//
+// True only when the selected method actually authenticated the peer —
+// Passkey Entry, Numeric Comparison or Out of Band.  Just Works is
+// `false` however many devices asked for MITM, which is the fact a
+// caller needs before it treats the link as trusted.
+pub fn is_authenticated(s: Smp) -> Bool
+    todo("smp.is_authenticated")
+
+// The peer's public key, once one has arrived and validated.
+//
+// `None` under LE Legacy pairing, which has no public keys at all, and
+// before Pairing_Public_Key under Secure Connections.  A key that
+// arrived and did NOT validate never reaches here: the procedure has
+// already failed with `DhKeyCheckFailed`, because a peer's point off
+// the curve is the invalid-curve attack and not a thing to hand a
+// caller.
+//
+// This is the one place p256-nv's types appear in this package's public
+// surface.  The rest of the curve work — a local key pair from the
+// entropy the host feeds in, and the ECDH behind f5 — happens inside
+// `feed_random` and `feed`, because a caller that had to run it would
+// be holding key material the state machine already has.
+pub fn peer_public_key(s: Smp) -> ?p256.PublicKey
+    todo("smp.peer_public_key")
+
+// ── The PDUs ────────────────────────────────────────────────────────
+
+// One SMP PDU (§ 3.3 to § 3.6).
+//
+// The state machine consumes and produces bytes, so a caller never
+// needs these; they are `pub` because a packet-capture tool, a test and
+// a conformance harness all do, and because a shape a reader can see is
+// how they check what the state machine is doing.
+pub enum Pdu
+    PairingRequest(features: Features, io_caps: IoCapability)
+    PairingResponse(features: Features, io_caps: IoCapability)
+    PairingConfirm(value: [u8])
+    PairingRandom(value: [u8])
+    PairingFailed(reason: Failure)
+    EncryptionInformation(ltk: [u8])
+    MasterIdentification(ediv: Int, rand: [u8])
+    IdentityInformation(irk: [u8])
+    IdentityAddressInformation(addr_type: Int, addr: [u8])
+    SigningInformation(csrk: [u8])
+    SecurityRequest(features: Features)
+    PairingPublicKey(x: [u8], y: [u8])
+    PairingDhKeyCheck(value: [u8])
+    KeypressNotification(kind: Int)
+
+// The PDU as its wire bytes: the opcode, then its parameters.
+pub fn encode_pdu(pdu: Pdu) -> [u8]
+    todo("smp.encode_pdu")
+
+// Read a PDU from an L2CAP payload.
+//
+// The error is the `Failure` the peer is owed, which is what makes this
+// worth a `Result`: `CommandNotSupported` for an opcode this package
+// does not know, and `InvalidParameters` for one whose length is wrong.
+pub fn decode_pdu(bytes: [u8]) -> Result<Pdu, Failure>
+    todo("smp.decode_pdu")
+
+// The opcode byte a PDU carries.
+pub fn pdu_opcode(pdu: Pdu) -> Int
+    todo("smp.pdu_opcode")
