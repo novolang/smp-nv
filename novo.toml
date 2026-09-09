@@ -1,6 +1,6 @@
 [package]
 name        = "smp-nv"
-version     = "0.0.2"
+version     = "0.0.3"
 description = "The Bluetooth Security Manager Protocol as a state machine that performs nothing: feed it PDUs, entropy and a person's answer, and it returns the actions a host must take.  LE Legacy and LE Secure Connections, the pairing toolbox, and key distribution.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -22,6 +22,7 @@ category    = "networking"
 tags        = ["bluetooth", "ble", "smp", "pairing", "bonding", "secure-connections", "sans-io", "security-manager", "embedded"]
 repository  = "https://github.com/novolang/smp-nv"
 maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
 
 [docs.pages]
 "README.md" = "Pairing, without a radio"
@@ -31,7 +32,7 @@ maintainers = ["novo-lang"]
 # entropy the host feeds in, and the ECDH that turns the peer's public
 # key into the DHKey f5 consumes.  A path dependency until both
 # packages have their own repositories.
-p256-nv = "^0.0.1"
+p256-nv = "^0.0.2"
 
 # AES-128 and AES-CMAC, which every function in `toolbox` is a
 # composition of.  Both are `core`, so this package stays `core`.
