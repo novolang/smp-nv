@@ -1,187 +1,327 @@
 # smp-nv
 
-**Status: NOT IMPLEMENTED — interface only.**
+The Security Manager Protocol (SMP) is how two Bluetooth Low Energy
+devices agree on the keys that encrypt a link. It is specified in the
+[Bluetooth Core Specification](https://www.bluetooth.com/specifications/specs/core-specification/),
+Volume 3, Part H. This package brings it to novo-lang as a state machine
+that performs nothing: feed it packets, entropy and a person's answer,
+and it hands back the actions a host must take. It runs on a channel
+that [l2cap-nv](https://novo-lang.org/packages/l2cap-nv) provides.
+[att-nv](https://novo-lang.org/packages/att-nv) is its sibling on the
+next channel along, and it is what most of the encryption this package
+arranges is for.
 
-Every public function below is published with its signature and its
-effect row, and every body is `todo()`.  Installing this package works;
-calling it panics with `not implemented`.
+**Status: NOT IMPLEMENTED — interface only.** Every function is declared
+with its full signature, but every body is a `todo()` that panics when
+called. The package is published so its design can be reviewed and
+depended on before it is implemented. Version 0.1.0 will be the first
+working release.
 
-## What this is
+## What the Security Manager is
 
-The Bluetooth Security Manager Protocol — Core Vol 3 Part H — as a state
-machine that performs nothing.  Feed it PDUs, entropy and a person's
-answer; it hands back the actions a host must take.  LE Legacy pairing
-and LE Secure Connections, the cryptographic toolbox both are built out
-of, and key distribution.
+**Pairing** is the procedure that gives two devices a shared key.
+**Bonding** is pairing plus storing that key, so the next connection
+skips the procedure. SMP is the protocol both run over, on L2CAP channel
+0x0006.
 
-It has no radio, no clock, no random number generator and no flash.  It
-has never heard of L2CAP beyond the number of the channel it rides on.
+There are two families. **LE Legacy pairing** is the original: the two
+sides exchange a confirm value and a nonce, derive a short-term key from
+them, and use it to encrypt the link long enough to distribute the real
+keys. **LE Secure Connections** replaced it in Bluetooth 4.2: the two
+sides exchange public keys on the P-256 curve, run Elliptic Curve
+Diffie-Hellman, and derive the long-term key from the shared secret. The
+SC bit of the AuthReq field in the first packet chooses between them.
 
-## Adding it, and checking it
+Within a family, the **pairing method** is decided by what each device
+can show and what it can be told, which the specification calls its
+**IO capability**. Section 2.3.5.1 gives the table. The method decides
+whether the pairing has **man-in-the-middle protection**, which is the
+guarantee that the device you paired with is the one you meant.
 
-```bash
-novo pkg add smp-nv         # into your novo.toml
-novo pkg build              # type- and effect-check the package
-novo test tests/smp_tests.nv
+| Method | What the person does | Man-in-the-middle protection |
+| --- | --- | --- |
+| Just Works | Nothing | None |
+| Passkey Entry | Reads six digits on one device and types them into the other | Yes |
+| Numeric Comparison | Compares six digits shown on both and confirms | Yes, and only under Secure Connections |
+| Out of Band | Nothing on this link. The data arrives by another channel | As good as that channel |
+
+When pairing succeeds the two sides distribute whatever keys they
+negotiated (section 3.6): the **long-term key** (LTK) that encrypts
+future connections, the **identity resolving key** (IRK) that lets a
+peer recognise a device using a rotating random address, and the
+**connection signature resolving key** (CSRK) that signs writes on an
+unencrypted link.
+
+| Quantity | Value |
+| --- | --- |
+| The channel SMP runs on | CID 0x0006 |
+| An encryption key size | 7 to 16 octets |
+| A confirm value, a nonce and a key | 16 bytes |
+| A public-key coordinate | 32 bytes |
+| An address in the toolbox | 7 bytes: the type byte, then six address bytes |
+| The prand of a resolvable address | 3 bytes |
+| A passkey and a comparison value | Six decimal digits, 0 to 999999 |
+
+Underneath both families is what the specification calls the
+**cryptographic toolbox**, section 2.2: nine functions built out of
+AES-128 and AES-CMAC with Bluetooth's own key identifiers, salts,
+counters and byte orders in them.
+
+| Function | Section | What it computes |
+| --- | --- | --- |
+| `c1` | 2.2.3 | The LE Legacy confirm value |
+| `s1` | 2.2.4 | The LE Legacy short-term key |
+| `ah` | 2.2.2 | The hash that resolves a resolvable private address |
+| `f4` | 2.2.6 | The Secure Connections confirm value |
+| `f5_mackey`, `f5_ltk` | 2.2.7 | The MacKey and the long-term key, from the Diffie-Hellman secret |
+| `f6` | 2.2.8 | The check value each side sends to prove it derived the same key |
+| `g2` | 2.2.9 | The six digits a person compares |
+| `h6` | 2.2.10 | The link-key conversion for cross-transport derivation |
+| `h7` | 2.2.11 | The salted conversion the CT2 bit selects instead of `h6` |
+
+This package performs no input or output. It has no radio, no clock, no
+random number generator and nowhere to write a bond. Pairing needs all
+four, and each one comes back as an **action** the host performs and
+reports on. That is what lets a Security Manager be a package rather
+than a layer of a stack, and what lets the same code run in a phone's
+host and in a peripheral's firmware.
+
+| Action | What the host does |
+| --- | --- |
+| `Send` | Puts the bytes on L2CAP CID 0x0006 |
+| `NeedRandom` | Draws that many bytes of entropy and calls `feed_random` |
+| `Confirm` | Asks the person and calls `feed_user` |
+| `StartEncryption` | Starts link-layer encryption with the key, then calls `feed_link_encrypted` |
+| `StoreKeys` | Writes the bond against the peer's identity, or drops it |
+| `Failed` | Reports that pairing is over and will not resume |
+
+## Install
+
+```
+novo pkg add smp-nv
 ```
 
-`novo test` is red today and that is the point of the release: every
-assertion below the first constant fails with `not implemented`.  The
-tests are the pairing choreography written as executable text — each one
-walks a step and checks that the action asked for is the one the
-specification says comes next — so they turn green in the order an
-implementation lane would want them to.
-
-## The one example that will work
+## Example
 
 ```novo
 use smp
 
-// One connection's pairing, driven to completion.  The host does
-// everything; this package decides what.
-fn pump(s: Smp, step: PairingStep) -> Smp
-    var cur = step
-    for i in 0..list.len(cur.actions)
-        match cur.actions[i]
-            Send(pdu)          => l2cap_send(smp.CID, pdu)
-            NeedRandom(n)      => cur = smp.feed_random(cur.smp, entropy(n))
-            Confirm(m, value)  => cur = smp.feed_user(cur.smp, ask(m, value))
-            StartEncryption(k) => cur = smp.feed_link_encrypted(encrypt_link(cur.smp, k))
-            StoreKeys(keys)    => save_bond(keys)
-            Failed(reason)     => report(reason)
-    cur.smp
+fn main() [io]
+    // What this device asks for and will accept. The key size is in
+    // octets and the two sides take the smaller of the two.
+    let features = Features {
+        bonding: true, mitm: true, secure_connections: true,
+        keypress: false, ct2: false, oob: false,
+        max_key_size: 16,
+        initiator_keys: KeyDistribution { enc: false, id: true, sign: false, link: false },
+        responder_keys: KeyDistribution { enc: true, id: true, sign: false, link: false } }
+
+    // A peripheral that can show six digits and be told yes or no.
+    let s = smp.new(Responder, features, DisplayYesNo)
+
+    // Starting asks the central to pair. Everything the host must do
+    // comes back as an action, in the order it must happen.
+    let step = smp.begin(s)
+    for i in 0..list.len(step.actions)
+        match step.actions[i]
+            Send(pdu)          => println("put ${list.len(pdu)} bytes on CID ${smp.CID}")
+            NeedRandom(n)      => println("draw ${n} bytes of entropy")
+            Confirm(_, value)  => println("ask the person about ${value}")
+            StartEncryption(k) => println("encrypt the link with a ${list.len(k)}-byte key")
+            StoreKeys(_)       => println("write the bond to flash")
+            Failed(reason)     => println("pairing stopped: ${reason.message()}")
 ```
 
-Nothing in that loop knows how pairing works. That is the whole claim.
+A real host does the same loop with real work in each arm, and feeds the
+answer back with `feed_random`, `feed_user` or `feed_link_encrypted`.
+Nothing in the loop knows how pairing works.
 
-## The layer, and why
+Build and test with `novo pkg build` and `novo test`. Today `novo test`
+fails on purpose: every test reaches a `not implemented: smp.<fn>`
+panic. The tests are the specification the implementation will have to
+satisfy.
 
-`core`, and the `Action` enum is what makes that true rather than
-aspirational.
+## What the package contains
 
-Pairing needs four things a `core` package may not have: entropy, a
-person, a link that can be encrypted, and somewhere to write a bond.
-Each is a variant this package RETURNS instead of an effect it declares.
-`NeedRandom` is the sharpest one — a Security Manager that drew its own
-nonces would need `[rand]`, and `[rand]` is `host`, and a `host`
-package cannot go in firmware, which is the one place a peripheral's
-pairing has to run.
+| Module | Contents |
+| --- | --- |
+| `smp` | The protocol. The state machine and the seven functions that drive it, the actions it returns, the vocabulary the two sides negotiate in, and all fourteen SMP packets with their encoder and decoder. |
+| `toolbox` | The nine cryptographic functions of section 2.2, as total functions over fixed-width byte strings. |
 
-`tests/embedded_probe.nv` is that claim in a form that either builds or
-does not, and **it does not build** — for a reason that is about this
-interface rather than about the toolchain, and is the most important
-thing in this release.
+## How to choose an entry point
 
-Every function in `toolbox` takes and returns `[u8]`, and `[u8]` is a
-heap list that `@tier(embedded)` forbids.  So there is no way to call
-this package from a device without allocating, and no probe that both
-exercises it and passes.  [crypto-nv](../crypto-nv) is the one published
-`core` package that makes the device claim and keeps it, and how it does
-so is the answer this package has not adopted: `pub @value struct Block`
-with `w: [Int; 16]`, a true inline array laid out in the struct itself,
-on the stack, with no header and no cell.  Every function in this
-toolbox is fixed-width — 16 bytes for a block, 32 for a public-key
-coordinate, 7 for an address, 3 for a prand — so the same treatment
-applies throughout, and it would delete half the tests, because a width
-could no longer be wrong.
+**The state machine is the ordinary way in.** `new` builds one, `begin`
+starts a procedure, and `feed`, `feed_random`, `feed_user` and
+`feed_link_encrypted` advance it. Each returns the new state machine and
+the actions to perform. `state`, `method` and `is_authenticated` report
+on it without driving it.
 
-That is a redesign of the interface and not a fix to a probe, which is
-what `0.0.x` is for.  The probe stays red and names the reason.
+**`encode_pdu` and `decode_pdu` are the codec underneath.** A host
+driving the state machine never needs them, because it passes bytes. A
+packet-capture tool, a test and a conformance harness all do.
 
-A second, smaller finding sits behind it: the scratch package the audit
-builds declares no dependencies, so a probe that reached `p256` could
-not be compiled at all.  A `core` package with `core` dependencies
-cannot make the full device claim the audit checks today.
+**The toolbox is for whoever is checking the arithmetic.** Its nine
+functions are what the state machine is made of. Call them directly to
+run the Core Specification's own vectors, or to compute one value
+outside a pairing, such as resolving a private address with `ah`.
 
-## The load-bearing interface
+## The rules a user needs
 
-```novo
-pub enum Action
-    Send(pdu: [u8])
-    NeedRandom(bytes: Int)
-    Confirm(method: Method, value: Int)
-    StartEncryption(key: [u8])
-    StoreKeys(keys: Keys)
-    Failed(reason: Failure)
+1. **Feed exactly the entropy that was asked for.** `NeedRandom` names a
+   byte count, and the source must be one you trust. Feeding fewer
+   bytes, or feeding when none was asked for, gives
+   `Failed(UnspecifiedReason)`. A pairing that continued on short
+   entropy would be worse than one that stopped.
+2. **The actions are in the order they must happen.** A `Send` before a
+   `Failed` is the Pairing_Failed packet the peer is owed. A host that
+   reordered them would take a device off the air before telling the
+   peer why.
+3. **`feed` never refuses.** A packet that does not decode, or that is
+   not legal in the current state, produces a `Send` of Pairing_Failed
+   and then a `Failed`. The peer is owed an answer, and a caller that
+   had to build that packet itself would be writing the protocol twice.
+4. **Say when the link is encrypted.** `feed_link_encrypted` is what
+   moves a legacy procedure past the short-term key and lets key
+   distribution begin. A host that starts encryption and forgets to
+   report it leaves the peer waiting for keys that never come.
+5. **`method` is `None` until both sides have spoken.** The method
+   depends on what the peer said, and guessing early is how a stack ends
+   up displaying a passkey for a Just Works pairing (Core Vol 3 Part H
+   section 2.3.5.1).
+6. **`is_authenticated` is false for Just Works.** It stays false
+   however many sides asked for man-in-the-middle protection, because
+   asking is not getting. Check it before treating the link as trusted.
+7. **Every field of `Keys` is optional.** What arrives is what the two
+   sides negotiated. A Secure Connections bond distributes no long-term
+   key at all, because both sides derived the same one from `f5`, and
+   the EDIV and Rand pair is legacy's way of naming a stored key
+   (section 3.6).
+8. **The encryption key size is negotiated down.** It is 7 to 16 octets
+   and the two sides take the smaller. A peer that asks for less than
+   this device's own minimum is refused with `EncryptionKeySize`
+   (section 3.5.1).
+9. **A packet fed in is the L2CAP payload.** The opcode byte comes
+   first and the four-byte L2CAP header is already off (section 3.1).
+10. **`Failure` is both this package's error type and the wire format.**
+    Its variants are the codes a Pairing_Failed packet carries, so a
+    decode that failed has already worked out what to send back
+    (section 3.5.5).
+11. **A public key that does not validate never reaches you.**
+    `peer_public_key` answers `None` before one has arrived, and a point
+    off the curve has already failed the procedure with
+    `DhKeyCheckFailed`. Handing a caller an invalid point is the
+    invalid-curve attack.
+12. **A responder's `begin` only asks.** It sends a Security_Request,
+    which invites the initiator to pair or to encrypt with an existing
+    bond. A peripheral cannot pair on its own authority.
+13. **A `Confirm` value of -1 means this side types the passkey.** For
+    Numeric Comparison the value is the six digits to display, and for
+    Passkey Entry it is the passkey to display unless it is -1.
+14. **The toolbox uses the specification's byte order**, which for SMP
+    is least-significant byte first for addresses and nonces and
+    most-significant first for the AES block. Its functions are total
+    and have no error channel, because none of them can fail on inputs
+    of the right width. The width of every argument is in its
+    documentation comment.
+
+## Running on a microcontroller
+
+novo-lang lets a package state which of its modules can run on a device
+with no heap allocator, and the compiler checks that claim on every
+build. `tests/embedded_probe.nv` is that claim as a program that either
+builds or does not.
+
+**It does not build, and this package cannot be called from a device
+today.** Every function in `toolbox` takes and returns `[u8]`, which is
+a heap list, and the embedded tier allows no heap allocation. There is
+no way to construct an argument for one of them there.
+
+The fix is a change to these signatures rather than to the probe. Every
+value the toolbox handles is fixed-width: 16 bytes for a block, 32 for a
+public-key coordinate, 7 for an address, 3 for a prand.
+[crypto-nv](https://novo-lang.org/packages/crypto-nv) is the published
+package that runs on a device and keeps doing so, and it manages it with
+a `@value` struct holding a true inline array, which lives on the
+caller's stack with no heap cell. Version 0.1.0 is where those signatures change.
+That is what a `0.0.x` release is for.
+
+## What is not included
+
+- **A radio, a clock, a random number generator and a bond store.** Each
+  is an action the host performs. `NeedRandom` is the sharpest of them:
+  a Security Manager that drew its own nonces would need the `[rand]`
+  effect, and a package with that effect cannot go in firmware, which is
+  the one place a peripheral's pairing has to run.
+- **The pairing timeout.** Section 3.4 gives a procedure 30 seconds.
+  This package has no clock, so the timer is the caller's, and `abort`
+  is what it calls when the timer expires.
+- **AES and the curve.** AES-128 and AES-CMAC are
+  [crypto-nv](https://novo-lang.org/packages/crypto-nv), specified in
+  FIPS 197 and RFC 4493. The P-256 curve is
+  [p256-nv](https://novo-lang.org/packages/p256-nv), specified in
+  FIPS 186-4. Both are useful to a reader who has never opened the Core
+  Specification, and `f5` is not, which is the line the three packages
+  are divided on.
+- **Address resolution and privacy.** `ah` computes the hash that
+  resolves a resolvable private address. Deciding which of a bond
+  store's identity resolving keys to try it with is the host's work.
+- **The channel.** Packets arrive as bytes and leave as bytes. Getting
+  them to and from CID 0x0006 is l2cap-nv's work.
+
+## Related packages
+
+- [l2cap-nv](https://novo-lang.org/packages/l2cap-nv) is the layer
+  below. It provides the channel, and `CID` here is its `CID_SMP`.
+- [att-nv](https://novo-lang.org/packages/att-nv) is the sibling on CID
+  0x0004. It reads and writes a peer's attributes, and its permission
+  check is told whether the link is encrypted and authenticated, which
+  is what this package arranges.
+- [crypto-nv](https://novo-lang.org/packages/crypto-nv) is AES-128 and
+  AES-CMAC, which every function in `toolbox` is a composition of.
+- [p256-nv](https://novo-lang.org/packages/p256-nv) is the curve behind
+  LE Secure Connections. Its `PublicKey` is the one type of another
+  package in this one's surface.
+- [hci-codec-nv](https://novo-lang.org/packages/hci-codec-nv) is the
+  interface to a controller, and
+  [ble-link-codec-nv](https://novo-lang.org/packages/ble-link-codec-nv)
+  is the link layer below that.
+- `std.crypto` in the standard library is OpenSSL. It is host only and
+  has none of the Bluetooth compositions, so nothing here uses it.
+
+## Tests
+
+```bash
+novo test tests/smp_tests.nv      # 21 tests against the signatures
 ```
 
-Six variants, and every effect a pairing needs is one of them.  Two
-details in it are decisions rather than shapes.
+The expected values are the ones the Bluetooth Core Specification
+publishes in Volume 3, Part H, Appendix D, which is where the
+implementation should take them from rather than from another stack.
+What the suite asserts beyond them is the choreography: each test walks
+one step of a pairing and checks that the action asked for is the one
+the specification says comes next. A host driving this package should
+never have to know anything the protocol did not tell it, and that is
+the property these tests are written to catch.
 
-**The actions are ordered, and the order is load bearing.**  A `Send`
-before a `Failed` is the Pairing_Failed PDU the peer is owed; a host
-that reordered them would take a device off the air before it had told
-the peer why.
+The tests compile today and fail at run, each on the `not implemented`
+panic that is its body. That is the expected state of an interface
+release. They turn green in the order an implementation would want them
+to, as bodies land.
 
-**`Failure` is both the error type and the wire format.**
-`decode_pdu` returns `Result<Pdu, Failure>` where `Failure` is Table 3.7
-— the codes a Pairing_Failed PDU carries.  A decode that failed has, by
-construction, already worked out what to send back, and a caller that
-had to map an error type onto those codes itself would be writing the
-protocol twice.
+## Implementation status
 
-## Where the crypto lives
-
-Three packages, one rule: **a function goes where its specification
-is.**
-
-- [crypto-nv](../crypto-nv) has AES-128 and AES-CMAC — FIPS 197 and
-  RFC 4493, useful to anyone.
-- [p256-nv](../p256-nv) has the curve — FIPS 186-4, useful to TLS and
-  JWT too.
-- This package has `c1`, `s1`, `ah`, `f4`, `f5`, `f6`, `g2`, `h6` and
-  `h7`, in `toolbox`.  Every one is Core Vol 3 Part H § 2.2, with
-  Bluetooth's own key identifiers, salts, counters and byte orders in
-  it, and no use outside Bluetooth pairing.
-
-The dividing question is not "is it cryptography" — all of it is — but
-"would a reader who has never opened the Core Specification have any use
-for this function".
-
-## The reference implementation, and what is NOT behind this interface
-
-`orbit/ble`'s host stack: `src/host/smp.nv` (PDU shapes),
-`smp_fsm.nv` (the state machine), `smp_ctx.nv`, `smp_compute.nv`,
-`smp_handler.nv` and `smp_loop.nv`, plus `crypto-ble-ecc`'s
-`smp_toolbox.nv` for the arithmetic.  The Core Spec's § D vectors are
-the tests.
-
-**Roughly half of this interface has nothing behind it**, and an
-implementation lane should know which half before estimating:
-
-| | in the reference |
+| Item | Implemented |
 | --- | --- |
-| LE Legacy Just Works | yes — the FSM, the PDUs and c1/s1 all exist |
-| LE Legacy Passkey Entry, OOB | no |
-| LE Secure Connections | no state machine at all; `smp.nv` lists Pairing_Public_Key and Pairing_DHKey_Check as out of scope |
-| f4, f5, f6, g2, h6, h7 | yes, with Core Spec vectors — and nothing calls them |
-| Key distribution (§ 3.6) | no — opcodes 0x06 to 0x0A are out of scope, and `smp_fsm.nv` records that bond storage "is not implemented anywhere in this package" |
-| Numeric Comparison, Keypress | no |
-| Initiator role | no — the reference is peripheral-only |
-
-The interface covers all of it because a Security Manager that offered
-only Just Works would have to break its own API to grow, and because the
-LE SC toolbox is already written and tested and merely unreachable.  But
-the split is not a port: it is a port of the legacy half and a first
-implementation of the rest.
-
-**One more thing the reference could not do that this design assumes.**
-Its state is not a value: `smp_ctx.nv` keeps the pairing context at a
-fixed RAM address, `0x2000F820`, reached through `hw.mem_*`, so every
-accessor carries `[hw]` and the whole SMP layer is `[hw]` by
-transitivity — including the pure arithmetic.  It is also a singleton,
-so the reference can pair with exactly one peer at a time.  `Smp` as a
-value is what removes both, and it is the biggest single change between
-the reference and this interface.
-
-## Status
-
-| item | implemented |
-| --- | --- |
-| `smp.CID` | yes — it is a constant |
+| `smp.CID` | yes (it is a constant) |
 | `smp.new`, `.begin`, `.feed`, `.feed_random`, `.feed_user`, `.feed_link_encrypted`, `.abort` | no |
 | `smp.state`, `.method`, `.is_authenticated`, `.peer_public_key` | no |
 | `smp.encode_pdu`, `.decode_pdu`, `.pdu_opcode` | no |
 | `smp.Failure.message` | no |
 | `toolbox.c1`, `.build_c1_p1`, `.build_c1_p2`, `.s1`, `.ah` | no |
 | `toolbox.f4`, `.f5_mackey`, `.f5_ltk`, `.f6`, `.g2`, `.h6`, `.h7` | no |
+
+## Licence
+
+Apache-2.0. See `LICENSE`.
+
+<!-- docs/writing-a-readme.md is the style guide for this page. -->
