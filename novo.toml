@@ -1,6 +1,6 @@
 [package]
 name        = "smp-nv"
-version     = "0.0.4"
+version     = "0.0.5"
 description = "The Bluetooth Security Manager Protocol as a state machine that performs nothing: feed it PDUs, entropy and a person's answer, and it returns the actions a host must take.  LE Legacy and LE Secure Connections, the pairing toolbox, and key distribution.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
