@@ -26,49 +26,33 @@
 // here; and the toolbox is where the arithmetic is, which is what a
 // tier check is for.
 
-// ── WHY THIS DOES NOT BUILD TODAY, AND WHY IT STAYS ────────────────
+// ── WHAT LINKS TODAY, AND WHAT IS STILL OPEN ──────────────────────
 //
-// It fails on its own first four lines:
+// The inputs are one static buffer, sixteen zero bytes bound at module
+// level.  A list built inside a function allocates when the function
+// runs, which `@tier(embedded)` refuses; one bound at module level is
+// built once during initialisation, so `main` allocates nothing of its
+// own.  Every body is a `todo()`, so what links today is the toolbox's
+// signatures.
 //
-//   tier error: function 'zeros16' is @tier(embedded) but constructs a
-//   list literal — implicit heap allocation is not allowed at this tier
-//   [E4000]
-//
-// That is not an accident of this file.  Every function in `toolbox`
-// takes and returns `[u8]`, and `[u8]` is a heap list that
-// `@tier(embedded)` forbids, so there is no way to CALL this package
-// from a device without allocating — and therefore no probe that both
-// exercises it and passes.  The interface's own shape is what fails,
-// not the probe.
-//
-// crypto-nv is the one published `core` package that makes the device
-// claim and keeps it, and how it does so is the answer this one has
-// not adopted: `pub @value struct Block` with `w: [Int; 16]`, a true
-// inline array laid out in the struct itself (SPEC § 14.4), on the
-// stack, with no header and no cell.  Every function in this toolbox is
-// fixed-width — 16 bytes for a block, 32 for a public-key coordinate, 7
-// for an address, 3 for a prand — so the same treatment applies
-// throughout, and it would make half the tests below unnecessary
-// because a width could no longer be wrong.
-//
-// It is not adopted here because it is a redesign of the interface
-// rather than a fix to the probe, and this release exists to surface
-// exactly that kind of question while it is still cheap to answer.  The
-// milestone review decides; `0.0.x` is where it gets decided.
-//
-// This file therefore stays as it is, red, naming the reason.
+// The question the signatures leave open is the answers.  Every
+// function here returns `[u8]`, and a body that builds its answer as a
+// list allocates on every call, which the tier refuses once the bodies
+// are written.  Every function is fixed-width — 16 bytes for a block,
+// 32 for a public-key coordinate, 7 for an address, 3 for a prand — so
+// the shape crypto-nv uses fits throughout: a `@value` struct holding a
+// `[Int; 16]` inline (SPEC § 14.4), on the stack, with no cell.  That
+// is a redesign of the interface rather than a change to this probe,
+// and the 0.0.x releases are where it is decided.
 
 use toolbox
 
-// Sixteen bytes, built the way firmware would build them.
-fn zeros16() -> [u8]
-    var b: [u8] = []
-    for _i in 0..16
-        b = list.append(b, [0 as u8])
-    b
+// Sixteen zero bytes, built once before `main`.
+let ZEROS16 = [0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+               0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
 
 fn main() [hw]
-    let z = zeros16()
+    let z = ZEROS16
 
     // Legacy: the confirm value and the short-term key.
     let p1 = toolbox.build_c1_p1(z, z, 0, 1)
