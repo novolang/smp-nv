@@ -1,14 +1,11 @@
 [package]
 name        = "smp-nv"
-version     = "0.0.5"
-description = "The Bluetooth Security Manager Protocol as a state machine that performs nothing: feed it PDUs, entropy and a person's answer, and it returns the actions a host must take.  LE Legacy and LE Secure Connections, the pairing toolbox, and key distribution.  Interface only — every body is a todo()."
+version     = "0.0.7"
+description = "The Bluetooth Security Manager Protocol as a state machine that performs nothing: feed it PDUs, entropy and a person's answer, and it returns the actions a host must take.  LE Legacy and LE Secure Connections, the pairing toolbox, and key distribution.  The toolbox and the packet codec work; the state machine is not written."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
+# The toolbox and the packet codec have bodies; the state machine is
+# still a `todo()`, so the package stays a draft at 0.0.x.
 stability   = "draft"
 
 # `core`, and the `Action` enum is what makes that true rather than
@@ -22,7 +19,7 @@ category    = "networking"
 tags        = ["bluetooth", "ble", "smp", "pairing", "bonding", "secure-connections", "sans-io", "security-manager", "embedded"]
 repository  = "https://github.com/novolang/smp-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.22.0"
 
 [docs.pages]
 "README.md" = "Pairing, without a radio"
@@ -32,8 +29,4 @@ novo        = ">= 0.8.9"
 # entropy the host feeds in, and the ECDH that turns the peer's public
 # key into the DHKey f5 consumes.  A path dependency until both
 # packages have their own repositories.
-p256-nv = "^0.0.2"
-
-# AES-128 and AES-CMAC, which every function in `toolbox` is a
-# composition of.  Both are `core`, so this package stays `core`.
-crypto-nv = "^0.1"
+p256-nv = { path = "../p256-nv" }

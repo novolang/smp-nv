@@ -1,8 +1,5 @@
 // toolbox — the SMP cryptographic toolbox, Core Vol 3 Part H § 2.2.
 //
-// Every body is a `todo()`.  The signatures are the design; see the
-// README for the stamp.
-//
 // These nine functions are what the Bluetooth specification calls the
 // cryptographic toolbox: AES-CMAC and AES-128 compositions with
 // Bluetooth's own key identifiers, salts, counters and byte orders
@@ -20,6 +17,10 @@
 // can fail on inputs of the right width, and a width mismatch is a
 // caller bug rather than a peer's.  The widths are in each doc comment.
 
+use std.list
+use smpaes
+use smpcmac
+
 // The confirm value of LE Legacy pairing (§ 2.2.3).
 //
 //     c1(k, r, p1, p2) = AES_k(AES_k(r ⊕ p1) ⊕ p2)
@@ -28,7 +29,8 @@
 // the 16-byte nonce, and `p1` / `p2` are the 16-byte blocks
 // `build_c1_p1` and `build_c1_p2` assemble.  Returns 16 bytes.
 pub fn c1(k: [u8], r: [u8], p1: [u8], p2: [u8]) -> [u8]
-    todo("toolbox.c1")
+    let inner = smpaes.aes128_encrypt(block_xor(r, p1), k)
+    smpaes.aes128_encrypt(block_xor(inner, p2), k)
 
 // The `p1` block of c1: `pres ‖ preq ‖ rat ‖ iat`.
 //
@@ -37,14 +39,28 @@ pub fn c1(k: [u8], r: [u8], p1: [u8], p2: [u8]) -> [u8]
 // responder's and initiator's address types, 0 for public and 1 for
 // random.  Returns 16 bytes.
 pub fn build_c1_p1(pres: [u8], preq: [u8], rat: Int, iat: Int) -> [u8]
-    todo("toolbox.build_c1_p1")
+    var out: [u8] = list.with_capacity(16)
+    for i in 0..7
+        list.push(out, pres[6 - i])
+    for i in 0..7
+        list.push(out, preq[6 - i])
+    list.push(out, (rat & 1) as u8)
+    list.push(out, (iat & 1) as u8)
+    out
 
 // The `p2` block of c1: four zero bytes, then `ia ‖ ra`.
 //
 // `ia` and `ra` are the 6-byte initiator and responder addresses,
 // LSB-first as BLE carries them.  Returns 16 bytes.
 pub fn build_c1_p2(ia: [u8], ra: [u8]) -> [u8]
-    todo("toolbox.build_c1_p2")
+    var out: [u8] = list.with_capacity(16)
+    for _i in 0..4
+        list.push(out, 0 as u8)
+    for i in 0..6
+        list.push(out, ia[5 - i])
+    for i in 0..6
+        list.push(out, ra[5 - i])
+    out
 
 // The short-term key of LE Legacy pairing (§ 2.2.4).
 //
@@ -53,7 +69,12 @@ pub fn build_c1_p2(ia: [u8], ra: [u8]) -> [u8]
 // Only the LOW eight bytes of each 16-byte nonce are used, `r1`'s in
 // the low half of the block.  Returns 16 bytes.
 pub fn s1(k: [u8], r1: [u8], r2: [u8]) -> [u8]
-    todo("toolbox.s1")
+    var block: [u8] = list.with_capacity(16)
+    for i in 8..16
+        list.push(block, r1[i])
+    for i in 8..16
+        list.push(block, r2[i])
+    smpaes.aes128_encrypt(block, k)
 
 // The random-address hash of § 2.2.2, which is what resolves a
 // resolvable private address.
@@ -62,7 +83,13 @@ pub fn s1(k: [u8], r1: [u8], r2: [u8]) -> [u8]
 //
 // `irk` is 16 bytes, `r` is the 3-byte prand.  Returns 3 bytes.
 pub fn ah(irk: [u8], r: [u8]) -> [u8]
-    todo("toolbox.ah")
+    var block: [u8] = list.with_capacity(16)
+    for _i in 0..13
+        list.push(block, 0 as u8)
+    for i in 0..3
+        list.push(block, r[i])
+    let out = smpaes.aes128_encrypt(block, irk)
+    [out[13], out[14], out[15]]
 
 // The confirm value of LE Secure Connections (§ 2.2.6).
 //
@@ -72,7 +99,7 @@ pub fn ah(irk: [u8], r: [u8]) -> [u8]
 // nonce, and `z` is one byte — zero for Just Works and Numeric
 // Comparison, and one passkey bit for Passkey Entry.  Returns 16 bytes.
 pub fn f4(u: [u8], v: [u8], x: [u8], z: Int) -> [u8]
-    todo("toolbox.f4")
+    smpcmac.aes_cmac(x, cat(cat(u, v), [z as u8]))
 
 // The MacKey half of the LE Secure Connections key derivation
 // (§ 2.2.7), which is f5 at counter 0.
@@ -81,7 +108,7 @@ pub fn f4(u: [u8], v: [u8], x: [u8], z: Int) -> [u8]
 // nonces, and `a1` and `a2` are the two 7-byte addresses — the address
 // type byte followed by the six address bytes.  Returns 16 bytes.
 pub fn f5_mackey(w: [u8], n1: [u8], n2: [u8], a1: [u8], a2: [u8]) -> [u8]
-    todo("toolbox.f5_mackey")
+    f5_block(smpcmac.aes_cmac(f5_salt(), w), 0, n1, n2, a1, a2)
 
 // The LTK half of the LE Secure Connections key derivation (§ 2.2.7),
 // which is f5 at counter 1.
@@ -89,7 +116,7 @@ pub fn f5_mackey(w: [u8], n1: [u8], n2: [u8], a1: [u8], a2: [u8]) -> [u8]
 // Same arguments as `f5_mackey`, and the two differ only by that
 // counter byte.  Returns 16 bytes.
 pub fn f5_ltk(w: [u8], n1: [u8], n2: [u8], a1: [u8], a2: [u8]) -> [u8]
-    todo("toolbox.f5_ltk")
+    f5_block(smpcmac.aes_cmac(f5_salt(), w), 1, n1, n2, a1, a2)
 
 // The DHKey check value of LE Secure Connections (§ 2.2.8).
 //
@@ -99,7 +126,7 @@ pub fn f5_ltk(w: [u8], n1: [u8], n2: [u8], a1: [u8], a2: [u8]) -> [u8]
 // AuthReq ‖ OOB ‖ IO-capability triple, and `a1` / `a2` are the 7-byte
 // addresses.  Returns 16 bytes.
 pub fn f6(w: [u8], n1: [u8], n2: [u8], r: [u8], iocap: [u8], a1: [u8], a2: [u8]) -> [u8]
-    todo("toolbox.f6")
+    smpcmac.aes_cmac(w, cat(cat(cat(cat(cat(n1, n2), r), iocap), a1), a2))
 
 // The six digits a user compares in Numeric Comparison (§ 2.2.9).
 //
@@ -109,18 +136,44 @@ pub fn f6(w: [u8], n1: [u8], n2: [u8], r: [u8], iocap: [u8], a1: [u8], a2: [u8])
 // are the two 16-byte nonces.  Returns a number in `0 ..= 999999`,
 // which the caller displays with leading zeroes.
 pub fn g2(u: [u8], v: [u8], x: [u8], y: [u8]) -> Int
-    todo("toolbox.g2")
+    let cm = smpcmac.aes_cmac(x, cat(cat(u, v), y))
+    let v32 = (cm[12] as Int << 24) | (cm[13] as Int << 16) | (cm[14] as Int << 8) | cm[15] as Int
+    v32 % 1000000
 
 // The link-key conversion of § 2.2.10, used by cross-transport key
 // derivation.
 //
 // `w` is the 16-byte key and `key_id` is 4 bytes.  Returns 16 bytes.
 pub fn h6(w: [u8], key_id: [u8]) -> [u8]
-    todo("toolbox.h6")
+    smpcmac.aes_cmac(w, key_id)
 
 // The salted key conversion of § 2.2.11, which is what the CT2 bit in
 // AuthReq selects over h6.
 //
 // `salt` and `w` are both 16 bytes.  Returns 16 bytes.
 pub fn h7(salt: [u8], w: [u8]) -> [u8]
-    todo("toolbox.h7")
+    smpcmac.aes_cmac(salt, w)
+
+// `a` followed by `b`.
+fn cat(a: [u8], b: [u8]) -> [u8]
+    list.concat(a, b)
+
+// The 16-byte XOR of two blocks.
+fn block_xor(a: [u8], b: [u8]) -> [u8]
+    var out: [u8] = list.with_capacity(16)
+    for i in 0..16
+        list.push(out, (a[i] as Int ^ b[i] as Int) as u8)
+    out
+
+// The SALT of f5, 6C888391AAF5A53860370BDB5A6083BE (section 2.2.7).
+fn f5_salt() -> [u8]
+    [0x6C as u8, 0x88 as u8, 0x83 as u8, 0x91 as u8, 0xAA as u8, 0xF5 as u8, 0xA5 as u8, 0x38 as u8,
+     0x60 as u8, 0x37 as u8, 0x0B as u8, 0xDB as u8, 0x5A as u8, 0x60 as u8, 0x83 as u8, 0xBE as u8]
+
+// One output block of f5. `counter` is 0 for the MacKey and 1 for the
+// LTK, the only difference between the two derivations. keyID is
+// "btle" and Length is 256.
+fn f5_block(t: [u8], counter: Int, n1: [u8], n2: [u8], a1: [u8], a2: [u8]) -> [u8]
+    let head: [u8] = [counter as u8, 0x62 as u8, 0x74 as u8, 0x6C as u8, 0x65 as u8]
+    let tail: [u8] = [0x01 as u8, 0x00 as u8]
+    smpcmac.aes_cmac(t, cat(cat(cat(cat(cat(head, n1), n2), a1), a2), tail))

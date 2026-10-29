@@ -4,12 +4,9 @@
 source = "registry"
 url = "https://registry.novo-lang.org"
 req = "^0.1"
-version = "0.1.6"
-hash = "ca4cad680d78976cdd161a97607b3a3f3f9c9ee9f97bda6584570475f5da499f"
+version = "0.1.7"
+hash = "c379e61661ab8e15a2058253f86c6f86d31b697ff1c0f060c176ea30dd45c4c5"
 
 [p256-nv]
-source = "registry"
-url = "https://registry.novo-lang.org"
-req = "^0.0.2"
-version = "0.0.2"
-hash = "43963bc44653381f2e569f678c34c7459bb8903d0a968e79eb5b1ccc6bfd00ac"
+source = "path"
+path = "../p256-nv"

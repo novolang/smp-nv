@@ -1,0 +1,182 @@
+// smp_toolbox_tests.nv — the cryptographic toolbox of Core Vol 3 Part H
+// section 2.2, against the specification's own vectors and against
+// Python's `cryptography` package.
+//
+// The first half is Appendix D (D.2 to D.8) and the section 2.2.3 and
+// 2.2.4 samples, written as the specification prints them. The second
+// half is 25 random rows per function. `tests/generate/gen_toolbox.py`
+// computes each row with AES-128 and AES-CMAC from OpenSSL, and
+// asserts the Appendix D vectors against its own formulas before it
+// writes a row, so the table cannot disagree with the specification
+// through a transcription error.
+//
+// Run with `--isolate` for one verdict per `@test`.
+
+use std.test
+use std.list
+use toolbox
+use smpaes
+use smpcmac
+
+fn nibble(c: Int) -> Int
+    if c >= 48 and c <= 57
+        c - 48
+    else if c >= 97 and c <= 102
+        c - 97 + 10
+    else if c >= 65 and c <= 70
+        c - 65 + 10
+    else
+        0
+
+fn hx(s: Str) -> [u8]
+    var out: [u8] = []
+    for i in 0..str.len(s) / 2
+        let hi = nibble(str.byte_at_or(s, i * 2, 0))
+        let lo = nibble(str.byte_at_or(s, i * 2 + 1, 0))
+        out = list.append(out, [(hi * 16 + lo) as u8])
+    out
+
+fn digit(v: Int) -> Str
+    if v < 10
+        str.from_int(v)
+    else
+        list.get(["a", "b", "c", "d", "e", "f"], v - 10)
+
+fn hex_of(b: [u8]) -> Str
+    var out = ""
+    for x in b
+        let v = x as Int
+        out = out + digit(v / 16) + digit(v % 16)
+    out
+
+fn int_of(h: Str) -> Int
+    var v = 0
+    for x in hx(h)
+        v = v * 256 + (x as Int)
+    v
+
+fn u() -> Str
+    "20b003d2f297be2c5e2c83a7e9f9a5b9eff49111acf4fddbcc0301480e359de6"
+
+fn v() -> Str
+    "55188b3d32f6bb9a900afcfbeed4e72a59cb9ac2f19d7cfb6b4fdd49f47fc5fd"
+
+fn n1() -> Str
+    "d5cb8454d177733effffb2ec712baeab"
+
+fn n2() -> Str
+    "a6e8e7cc25a75f6e216583f7ff3dc4cf"
+
+fn a1() -> Str
+    "0056123737bfce"
+
+fn a2() -> Str
+    "00a713702dcfc1"
+
+fn irk() -> Str
+    "ec0234a357c8ad05341010a60a397d9b"
+
+@test
+fn test_appendix_d_the_specification_vectors() [io]
+    test.case("D.2 f4")
+    test.assert_eq_str(hex_of(toolbox.f4(hx(u()), hx(v()), hx(n1()), 0)), "f2c916f107a9bd1cf1eda1bea974872d")
+    test.case("D.3 f5: MacKey and LTK")
+    let w = hx(irk() + "99796b13b4f866f1868d34f373bfa698")
+    test.assert_eq_str(hex_of(toolbox.f5_mackey(w, hx(n1()), hx(n2()), hx(a1()), hx(a2()))), "2965f176a1084a02fd3f6a20ce636e20")
+    test.assert_eq_str(hex_of(toolbox.f5_ltk(w, hx(n1()), hx(n2()), hx(a1()), hx(a2()))), "6986791169d7cd23980522b594750a38")
+    test.case("D.4 f6")
+    test.assert_eq_str(hex_of(toolbox.f6(hx("2965f176a1084a02fd3f6a20ce636e20"), hx(n1()), hx(n2()), hx("12a3343bb453bb5408da42d20c2d0fc8"), hx("010102"), hx(a1()), hx(a2()))), "e3c473989cd0e8c5d26c0b09da958f61")
+    test.case("D.5 g2")
+    test.assert_eq(toolbox.g2(hx(u()), hx(v()), hx(n1()), hx(n2())), 938554)
+    test.case("D.6 h6")
+    test.assert_eq_str(hex_of(toolbox.h6(hx(irk()), hx("6c656272"))), "2d9ae102e76dc91ce8d3a9e280b16399")
+    test.case("D.7 ah")
+    test.assert_eq_str(hex_of(toolbox.ah(hx(irk()), hx("708194"))), "0dfbaa")
+    test.case("D.8 h7")
+    test.assert_eq_str(hex_of(toolbox.h7(hx("000000000000000000000000746d7031"), hx(irk()))), "fb173597c6a3c0ecd2998c2a75a57011")
+
+@test
+fn test_legacy_samples_of_sections_2_2_3_and_2_2_4() [io]
+    let preq = hx("01010000100707")
+    let pres = hx("02030000080005")
+    test.case("p1 and p2 are built in the order the specification prints them")
+    test.assert_eq_str(hex_of(toolbox.build_c1_p1(pres, preq, 0, 1)), "05000800000302070710000001010001")
+    test.assert_eq_str(hex_of(toolbox.build_c1_p2(hx("A6A5A4A3A2A1"), hx("B6B5B4B3B2B1"))), "00000000a1a2a3a4a5a6b1b2b3b4b5b6")
+    test.case("the address types are taken as their low bit")
+    test.assert_eq_str(hex_of(toolbox.build_c1_p1(pres, preq, 2, 3)), "05000800000302070710000001010001")
+    test.assert_eq_str(hex_of(toolbox.build_c1_p1(pres, preq, 1, 0)), "05000800000302070710000001010100")
+    test.case("c1 over them")
+    let zero = hx("00000000000000000000000000000000")
+    test.assert_eq_str(hex_of(toolbox.c1(zero, hx("5783D52156AD6F0E6388274EC6702EE0"), hx("05000800000302070710000001010001"), hx("00000000A1A2A3A4A5A6B1B2B3B4B5B6"))), "1e1e3fef878988ead2a74dc5bef13b86")
+    test.case("s1 uses the low eight octets of each nonce")
+    test.assert_eq_str(hex_of(toolbox.s1(zero, hx("000F0E0D0C0B0A091122334455667788"), hx("010203040506070899AABBCCDDEEFF00"))), "9a1fe1f0e8b0f49b5b4216ae796da062")
+    test.assert_eq_str(hex_of(toolbox.s1(zero, hx("FFFFFFFFFFFFFFFF1122334455667788"), hx("EEEEEEEEEEEEEEEE99AABBCCDDEEFF00"))), "9a1fe1f0e8b0f49b5b4216ae796da062")
+
+@test
+fn test_the_z_octet_of_f4_is_part_of_the_message() [io]
+    test.case("passkey rounds use Z = 0x80 or 0x81, and each differs from Just Works")
+    let a = hex_of(toolbox.f4(hx(u()), hx(v()), hx(n1()), 0))
+    let b = hex_of(toolbox.f4(hx(u()), hx(v()), hx(n1()), 128))
+    let c = hex_of(toolbox.f4(hx(u()), hx(v()), hx(n1()), 129))
+    test.assert(a != b)
+    test.assert(b != c)
+
+@test
+fn test_aes_128_against_fips_197() [io]
+    test.case("Appendix B and C.1")
+    test.assert_eq_str(hex_of(smpaes.aes128_encrypt(hx("3243f6a8885a308d313198a2e0370734"), hx("2b7e151628aed2a6abf7158809cf4f3c"))), "3925841d02dc09fbdc118597196a0b32")
+    test.assert_eq_str(hex_of(smpaes.aes128_encrypt(hx("00112233445566778899aabbccddeeff"), hx("000102030405060708090a0b0c0d0e0f"))), "69c4e0d86a7b0430d8cdb78070b4c55a")
+    test.case("25 random blocks against OpenSSL")
+    let t = aes_table()
+    for r in 0..list.len(t) / 3
+        test.assert_eq_str(hex_of(smpaes.aes128_encrypt(hx(t[3 * r + 1]), hx(t[3 * r]))), t[3 * r + 2])
+
+@test
+fn test_aes_cmac_against_rfc_4493() [io]
+    let key = hx("2b7e151628aed2a6abf7158809cf4f3c")
+    test.case("the four examples of section 4")
+    test.assert_eq_str(hex_of(smpcmac.aes_cmac(key, hx(""))), "bb1d6929e95937287fa37d129b756746")
+    test.assert_eq_str(hex_of(smpcmac.aes_cmac(key, hx("6bc1bee22e409f96e93d7e117393172a"))), "070a16b46b4d4144f79bdd9dd04a287c")
+    test.assert_eq_str(hex_of(smpcmac.aes_cmac(key, hx("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411"))), "dfa66747de9ae63030ca32611497c827")
+    test.assert_eq_str(hex_of(smpcmac.aes_cmac(key, hx("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710"))), "51f0bebf7e3b9d92fc49741779363cfe")
+    test.case("lengths 0 to 49, 63 to 65, 100 and 127 to 129 against OpenSSL")
+    let t = cmac_table()
+    for r in 0..list.len(t) / 3
+        test.assert_eq_str(hex_of(smpcmac.aes_cmac(hx(t[3 * r]), hx(t[3 * r + 1]))), t[3 * r + 2])
+
+@test
+fn test_random_rows_against_openssl() [io]
+    let t = c1_table()
+    for r in 0..list.len(t) / 5
+        test.assert_eq_str(hex_of(toolbox.c1(hx(t[5 * r]), hx(t[5 * r + 1]), hx(t[5 * r + 2]), hx(t[5 * r + 3]))), t[5 * r + 4])
+    let s = s1_table()
+    for r in 0..list.len(s) / 4
+        test.assert_eq_str(hex_of(toolbox.s1(hx(s[4 * r]), hx(s[4 * r + 1]), hx(s[4 * r + 2]))), s[4 * r + 3])
+    let a = ah_table()
+    for r in 0..list.len(a) / 3
+        test.assert_eq_str(hex_of(toolbox.ah(hx(a[3 * r]), hx(a[3 * r + 1]))), a[3 * r + 2])
+    let f = f4_table()
+    for r in 0..list.len(f) / 5
+        test.assert_eq_str(hex_of(toolbox.f4(hx(f[5 * r]), hx(f[5 * r + 1]), hx(f[5 * r + 2]), int_of(f[5 * r + 3]))), f[5 * r + 4])
+    let g = f5_table()
+    for r in 0..list.len(g) / 7
+        test.assert_eq_str(hex_of(toolbox.f5_mackey(hx(g[7 * r]), hx(g[7 * r + 1]), hx(g[7 * r + 2]), hx(g[7 * r + 3]), hx(g[7 * r + 4]))), g[7 * r + 5])
+        test.assert_eq_str(hex_of(toolbox.f5_ltk(hx(g[7 * r]), hx(g[7 * r + 1]), hx(g[7 * r + 2]), hx(g[7 * r + 3]), hx(g[7 * r + 4]))), g[7 * r + 6])
+    let h = f6_table()
+    for r in 0..list.len(h) / 8
+        test.assert_eq_str(hex_of(toolbox.f6(hx(h[8 * r]), hx(h[8 * r + 1]), hx(h[8 * r + 2]), hx(h[8 * r + 3]), hx(h[8 * r + 4]), hx(h[8 * r + 5]), hx(h[8 * r + 6]))), h[8 * r + 7])
+    let q = g2_table()
+    for r in 0..list.len(q) / 5
+        test.assert_eq(toolbox.g2(hx(q[5 * r]), hx(q[5 * r + 1]), hx(q[5 * r + 2]), hx(q[5 * r + 3])), int_of(q[5 * r + 4]))
+    let h6t = h6_table()
+    for r in 0..list.len(h6t) / 3
+        test.assert_eq_str(hex_of(toolbox.h6(hx(h6t[3 * r]), hx(h6t[3 * r + 1]))), h6t[3 * r + 2])
+    let h7t = h7_table()
+    for r in 0..list.len(h7t) / 3
+        test.assert_eq_str(hex_of(toolbox.h7(hx(h7t[3 * r]), hx(h7t[3 * r + 1]))), h7t[3 * r + 2])
+    let p1t = p1_table()
+    for r in 0..list.len(p1t) / 5
+        test.assert_eq_str(hex_of(toolbox.build_c1_p1(hx(p1t[5 * r]), hx(p1t[5 * r + 1]), int_of(p1t[5 * r + 2]), int_of(p1t[5 * r + 3]))), p1t[5 * r + 4])
+    let p2t = p2_table()
+    for r in 0..list.len(p2t) / 3
+        test.assert_eq_str(hex_of(toolbox.build_c1_p2(hx(p2t[3 * r]), hx(p2t[3 * r + 1]))), p2t[3 * r + 2])

@@ -1,0 +1,223 @@
+// smp_pdu_tests.nv — the PDU codec of Core Vol 3 Part H sections 3.3
+// to 3.6.
+//
+// The anchor is the pair of PDUs the specification itself prints in
+// its section 2.2.3 sample data for c1: a Pairing_Request
+// `0x07071000000101` and a Pairing_Response `0x05000800000302`, written
+// most significant octet first, so on the wire `01 01 00 00 10 07 07`
+// and `02 03 00 00 08 00 05`. Those are decoded, their fields checked
+// against the specification's table, and encoded back.
+//
+// The rest is a round trip of every opcode, every length that is wrong
+// for every opcode, and the reserved values the specification says how
+// to read.
+//
+// Run with `--isolate` for one verdict per `@test`.
+
+use std.test
+use std.list
+use smp
+
+fn nibble(c: Int) -> Int
+    if c >= 48 and c <= 57
+        c - 48
+    else if c >= 97 and c <= 102
+        c - 97 + 10
+    else
+        0
+
+fn hx(s: Str) -> [u8]
+    var out: [u8] = []
+    for i in 0..str.len(s) / 2
+        let hi = nibble(str.byte_at_or(s, i * 2, 0))
+        let lo = nibble(str.byte_at_or(s, i * 2 + 1, 0))
+        out = list.append(out, [(hi * 16 + lo) as u8])
+    out
+
+fn digit(v: Int) -> Str
+    if v < 10
+        str.from_int(v)
+    else
+        list.get(["a", "b", "c", "d", "e", "f"], v - 10)
+
+fn hex_of(b: [u8]) -> Str
+    var out = ""
+    for x in b
+        let v = x as Int
+        out = out + digit(v / 16) + digit(v % 16)
+    out
+
+// `n` zero octets as hex.
+fn rep00(n: Int) -> Str
+    var out = ""
+    for _i in 0..n
+        out = out + "00"
+    out
+
+// "ok" and the opcode for a PDU that decodes, else the message of the refusal.
+fn verdict(h: Str) -> Str
+    match smp.decode_pdu(hx(h))
+        Ok(p)  => "ok ${smp.pdu_opcode(p)}"
+        Err(e) => e.message()
+
+@test
+fn test_the_specification_s_own_pairing_pdus() [io]
+    test.case("the Pairing_Request of section 2.2.3")
+    match smp.decode_pdu(hx("01010000100707"))
+        Ok(PairingRequest(f, io)) =>
+            test.assert(io == DisplayYesNo)
+            test.assert(f.bonding == false)
+            test.assert(f.mitm == false)
+            test.assert(f.secure_connections == false)
+            test.assert(f.oob == false)
+            test.assert_eq(f.max_key_size, 16)
+            test.assert(f.initiator_keys.enc and f.initiator_keys.id and f.initiator_keys.sign)
+            test.assert(f.initiator_keys.link == false)
+            test.assert(f.responder_keys.enc and f.responder_keys.id and f.responder_keys.sign)
+            test.assert_eq_str(hex_of(smp.encode_pdu(PairingRequest(f, io))), "01010000100707")
+        _                         => test.fail("a Pairing_Request")
+    test.case("the Pairing_Response of section 2.2.3")
+    match smp.decode_pdu(hx("02030000080005"))
+        Ok(PairingResponse(f, io)) =>
+            test.assert(io == NoInputNoOutput)
+            test.assert_eq(f.max_key_size, 8)
+            test.assert(f.initiator_keys.enc == false and f.initiator_keys.id == false)
+            test.assert(f.responder_keys.enc and f.responder_keys.sign and f.responder_keys.id == false)
+            test.assert_eq_str(hex_of(smp.encode_pdu(PairingResponse(f, io))), "02030000080005")
+        _                          => test.fail("a Pairing_Response")
+
+@test
+fn test_every_opcode_round_trips() [io]
+    let zeros16 = "00112233445566778899aabbccddeeff"
+    let cases = [
+        "0104003d100f0f",
+        "02000101070103",
+        "03" + zeros16,
+        "04" + zeros16,
+        "0508",
+        "06" + zeros16,
+        "07abcd0102030405060708",
+        "08" + zeros16,
+        "0901c0a1b2c3d4e5",
+        "0a" + zeros16,
+        "0b2d",
+        "0c" + "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" + "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+        "0d" + zeros16,
+        "0e03"]
+    test.case("decode then encode gives the same bytes, and the opcode is the first byte")
+    for c in cases
+        match smp.decode_pdu(hx(c))
+            Err(_) => test.fail("${c} should decode")
+            Ok(p)  =>
+                test.assert_eq_str(hex_of(smp.encode_pdu(p)), c)
+                test.assert_eq(smp.pdu_opcode(p), hx(c)[0] as Int)
+
+@test
+fn test_fields_are_read_from_the_right_bits() [io]
+    test.case("AuthReq bits: bonding, MITM, SC, keypress, CT2")
+    match smp.decode_pdu(hx("0104003d100f0f"))
+        Ok(PairingRequest(f, io)) =>
+            test.assert(io == KeyboardDisplay)
+            test.assert(f.oob == false)
+            test.assert(f.bonding and f.mitm and f.secure_connections and f.keypress and f.ct2)
+            test.assert_eq(f.max_key_size, 16)
+            test.assert(f.initiator_keys.link and f.responder_keys.link)
+        _                         => test.fail("a Pairing_Request")
+    match smp.decode_pdu(hx("02000101070103"))
+        Ok(PairingResponse(f, io)) =>
+            test.assert(io == DisplayOnly)
+            test.assert(f.oob)
+            test.assert(f.bonding)
+            test.assert(f.mitm == false and f.secure_connections == false and f.keypress == false and f.ct2 == false)
+        _                          => test.fail("a Pairing_Response")
+    test.case("the bonding flag is the two low bits read as 01; 10, 11 and 00 are no bonding")
+    match smp.decode_pdu(hx("0b02"))
+        Ok(SecurityRequest(f)) => test.assert(f.bonding == false)
+        _                      => test.fail("a Security_Request")
+    match smp.decode_pdu(hx("0b03"))
+        Ok(SecurityRequest(f)) => test.assert(f.bonding == false)
+        _                      => test.fail("a Security_Request")
+    test.case("Master identification: EDIV is two octets, least significant first")
+    match smp.decode_pdu(hx("07abcd0102030405060708"))
+        Ok(MasterIdentification(ediv, rand)) =>
+            test.assert_eq(ediv, 0xcdab)
+            test.assert_eq_str(hex_of(rand), "0102030405060708")
+        _                                    => test.fail("a Master identification")
+    test.case("Identity address: the type, then six octets")
+    match smp.decode_pdu(hx("0901c0a1b2c3d4e5"))
+        Ok(IdentityAddressInformation(t, a)) =>
+            test.assert_eq(t, 1)
+            test.assert_eq_str(hex_of(a), "c0a1b2c3d4e5")
+        _                                    => test.fail("an Identity address information")
+    test.case("the public key keeps its wire order, X then Y")
+    match smp.decode_pdu(hx("0c" + "01" + rep00(31) + "02" + rep00(31)))
+        Ok(PairingPublicKey(x, y)) =>
+            test.assert_eq(list.len(x), 32)
+            test.assert_eq(x[0] as Int, 1)
+            test.assert_eq(y[0] as Int, 2)
+        _                          => test.fail("a Pairing_Public_Key")
+
+@test
+fn test_refusals() [io]
+    test.case("empty is InvalidParameters")
+    test.assert_eq_str(verdict(""), "a pairing parameter is invalid")
+    test.case("opcodes this package does not know")
+    test.assert_eq_str(verdict("00"), "the command is not supported")
+    test.assert_eq_str(verdict("0f"), "the command is not supported")
+    test.assert_eq_str(verdict("ff0102"), "the command is not supported")
+    test.case("a wrong length is InvalidParameters for every opcode")
+    let bad = ["01",
+        "010100001007",
+        "0101000010070707",
+        "02",
+        "03",
+        "0300",
+        "04" + rep00(17),
+        "05",
+        "050808",
+        "06",
+        "07" + rep00(9),
+        "08",
+        "0900",
+        "09" + rep00(8),
+        "0a",
+        "0b",
+        "0b0000",
+        "0c",
+        "0c" + rep00(63),
+        "0c" + rep00(65),
+        "0d",
+        "0e",
+        "0e0000"]
+    for b in bad
+        test.assert_eq_str(verdict(b), "a pairing parameter is invalid")
+    test.case("an IO capability above 4, an OOB flag above 1, a key size outside 7 to 16")
+    test.assert_eq_str(verdict("01050000100707"), "a pairing parameter is invalid")
+    test.assert_eq_str(verdict("01010200100707"), "a pairing parameter is invalid")
+    test.assert_eq_str(verdict("01010000060707"), "a pairing parameter is invalid")
+    test.assert_eq_str(verdict("01010000110707"), "a pairing parameter is invalid")
+    test.assert_eq_str(verdict("01010000070707"), "ok 1")
+    test.assert_eq_str(verdict("01010000100707"), "ok 1")
+
+@test
+fn test_failure_codes_round_trip_and_reserved_ones_are_unspecified() [io]
+    let all = [PasskeyEntryFailed, OobNotAvailable, AuthenticationRequirements, ConfirmValueFailed, PairingNotSupported,
+               EncryptionKeySize, CommandNotSupported, UnspecifiedReason, RepeatedAttempts, InvalidParameters,
+               DhKeyCheckFailed, NumericComparisonFailed, BrEdrPairingInProgress, CrossTransportKeyNotAllowed, KeyRejected]
+    test.case("the fifteen codes 1 to 15")
+    for i in 0..15
+        let wire = smp.encode_pdu(PairingFailed(all[i]))
+        test.assert_eq(wire[1] as Int, i + 1)
+        match smp.decode_pdu(wire)
+            Ok(PairingFailed(r)) => test.assert_eq_str(r.message(), all[i].message())
+            _                    => test.fail("a Pairing_Failed")
+    test.case("a reserved code is Unspecified Reason")
+    for code in ["00", "10", "ff"]
+        match smp.decode_pdu(hx("05" + code))
+            Ok(PairingFailed(r)) => test.assert_eq_str(r.message(), "pairing failed for an unspecified reason")
+            _                    => test.fail("a Pairing_Failed")
+    test.case("every failure has its own message")
+    var seen: [Str] = []
+    for f in all
+        test.assert(list.contains(seen, f.message()) == false)
+        list.push(seen, f.message())

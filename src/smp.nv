@@ -1,9 +1,8 @@
 // smp — the Bluetooth Security Manager Protocol, as a state machine
 // that performs nothing.
 //
-// Every body is a `todo()`.  The signatures and the effect rows are the
-// design, and the compiler checks them as claims; see the README for
-// the stamp.
+// The packet codec and the failure messages have bodies; the state
+// machine is still a `todo()` and the README says why.
 //
 // Core Vol 3 Part H.  SMP rides over L2CAP on CID 0x0006 and pairs two
 // devices: it negotiates a method, exchanges confirms and nonces,
@@ -16,6 +15,7 @@
 // link, and this package asks for none of them: it ASKS, through
 // `Action`, and the host does it and feeds the answer back.
 
+use std.list
 use p256
 
 // The L2CAP channel identifier SMP runs on (§ 3.1).
@@ -111,7 +111,22 @@ pub enum Failure
 // type only if it implements `Error`.
 impl Error for Failure
     fn message(self) -> Str
-        todo("smp.Failure.message")
+        match self
+            PasskeyEntryFailed          => "the passkey entry failed"
+            OobNotAvailable             => "out-of-band data is not available"
+            AuthenticationRequirements  => "the authentication requirements cannot be met"
+            ConfirmValueFailed          => "the confirm value did not match"
+            PairingNotSupported         => "pairing is not supported"
+            EncryptionKeySize           => "the encryption key size is too small"
+            CommandNotSupported         => "the command is not supported"
+            UnspecifiedReason           => "pairing failed for an unspecified reason"
+            RepeatedAttempts            => "too many pairing attempts too soon"
+            InvalidParameters           => "a pairing parameter is invalid"
+            DhKeyCheckFailed            => "the DHKey check value did not match"
+            NumericComparisonFailed     => "the numeric comparison failed"
+            BrEdrPairingInProgress      => "a BR/EDR pairing is in progress"
+            CrossTransportKeyNotAllowed => "cross-transport key derivation is not allowed"
+            KeyRejected                 => "the key was rejected"
 
 // The key material one side distributed to the other (§ 3.6).
 //
@@ -343,7 +358,30 @@ pub enum Pdu
 
 // The PDU as its wire bytes: the opcode, then its parameters.
 pub fn encode_pdu(pdu: Pdu) -> [u8]
-    todo("smp.encode_pdu")
+    var out: [u8] = [pdu_opcode(pdu) as u8]
+    match pdu
+        PairingRequest(f, io)            => push_pairing(var out, f, io)
+        PairingResponse(f, io)           => push_pairing(var out, f, io)
+        PairingConfirm(v)                => push_all(var out, v)
+        PairingRandom(v)                 => push_all(var out, v)
+        PairingFailed(r)                 => list.push(out, failure_code(r) as u8)
+        EncryptionInformation(k)         => push_all(var out, k)
+        MasterIdentification(ediv, rand) =>
+            list.push(out, (ediv & 255) as u8)
+            list.push(out, ((ediv >>> 8) & 255) as u8)
+            push_all(var out, rand)
+        IdentityInformation(k)           => push_all(var out, k)
+        IdentityAddressInformation(t, a) =>
+            list.push(out, t as u8)
+            push_all(var out, a)
+        SigningInformation(k)            => push_all(var out, k)
+        SecurityRequest(f)               => list.push(out, auth_req(f) as u8)
+        PairingPublicKey(x, y)           =>
+            push_all(var out, x)
+            push_all(var out, y)
+        PairingDhKeyCheck(v)             => push_all(var out, v)
+        KeypressNotification(k)          => list.push(out, k as u8)
+    out
 
 // Read a PDU from an L2CAP payload.
 //
@@ -351,8 +389,243 @@ pub fn encode_pdu(pdu: Pdu) -> [u8]
 // worth a `Result`: `CommandNotSupported` for an opcode this package
 // does not know, and `InvalidParameters` for one whose length is wrong.
 pub fn decode_pdu(bytes: [u8]) -> Result<Pdu, Failure>
-    todo("smp.decode_pdu")
+    if list.len(bytes) == 0
+        Err(InvalidParameters)
+    else
+        let op = bytes[0] as Int
+        let n = list.len(bytes) - 1
+        if op == 1 or op == 2
+            if n != 6
+                Err(InvalidParameters)
+            else
+                match read_features(bytes, 3)
+                    Err(e) => Err(e)
+                    Ok(f)  =>
+                        match io_capability(bytes[1] as Int)
+                            Err(e) => Err(e)
+                            Ok(io) => if op == 1
+                                Ok(PairingRequest(f, io))
+                            else
+                                Ok(PairingResponse(f, io))
+        else if op == 3
+            if n == 16
+                Ok(PairingConfirm(tail(bytes, 1)))
+            else
+                Err(InvalidParameters)
+        else if op == 4
+            if n == 16
+                Ok(PairingRandom(tail(bytes, 1)))
+            else
+                Err(InvalidParameters)
+        else if op == 5
+            if n == 1
+                Ok(PairingFailed(failure_of(bytes[1] as Int)))
+            else
+                Err(InvalidParameters)
+        else if op == 6
+            if n == 16
+                Ok(EncryptionInformation(tail(bytes, 1)))
+            else
+                Err(InvalidParameters)
+        else if op == 7
+            if n == 10
+                Ok(MasterIdentification(bytes[1] as Int | (bytes[2] as Int << 8), tail(bytes, 3)))
+            else
+                Err(InvalidParameters)
+        else if op == 8
+            if n == 16
+                Ok(IdentityInformation(tail(bytes, 1)))
+            else
+                Err(InvalidParameters)
+        else if op == 9
+            if n == 7
+                Ok(IdentityAddressInformation(bytes[1] as Int, tail(bytes, 2)))
+            else
+                Err(InvalidParameters)
+        else if op == 10
+            if n == 16
+                Ok(SigningInformation(tail(bytes, 1)))
+            else
+                Err(InvalidParameters)
+        else if op == 11
+            if n == 1
+                Ok(SecurityRequest(auth_features(bytes[1] as Int)))
+            else
+                Err(InvalidParameters)
+        else if op == 12
+            if n == 64
+                Ok(PairingPublicKey(slice(bytes, 1, 33), tail(bytes, 33)))
+            else
+                Err(InvalidParameters)
+        else if op == 13
+            if n == 16
+                Ok(PairingDhKeyCheck(tail(bytes, 1)))
+            else
+                Err(InvalidParameters)
+        else if op == 14
+            if n == 1
+                Ok(KeypressNotification(bytes[1] as Int))
+            else
+                Err(InvalidParameters)
+        else
+            Err(CommandNotSupported)
 
 // The opcode byte a PDU carries.
 pub fn pdu_opcode(pdu: Pdu) -> Int
-    todo("smp.pdu_opcode")
+    match pdu
+        PairingRequest(_, _)             => 1
+        PairingResponse(_, _)            => 2
+        PairingConfirm(_)                => 3
+        PairingRandom(_)                 => 4
+        PairingFailed(_)                 => 5
+        EncryptionInformation(_)         => 6
+        MasterIdentification(_, _)       => 7
+        IdentityInformation(_)           => 8
+        IdentityAddressInformation(_, _) => 9
+        SigningInformation(_)            => 10
+        SecurityRequest(_)               => 11
+        PairingPublicKey(_, _)           => 12
+        PairingDhKeyCheck(_)             => 13
+        KeypressNotification(_)          => 14
+
+// ── Wire helpers ────────────────────────────────────────────────────
+
+// Append every byte of `src` to `out`.
+fn push_all(var out: [u8], src: [u8])
+    for b in src
+        list.push(out, b)
+
+// `bytes[from..]` as a new list.
+fn tail(bytes: [u8], from: Int) -> [u8]
+    slice(bytes, from, list.len(bytes))
+
+// `bytes[from..to]` as a new list.
+fn slice(bytes: [u8], from: Int, to: Int) -> [u8]
+    var out: [u8] = list.with_capacity(to - from)
+    for i in from..to
+        list.push(out, bytes[i])
+    out
+
+fn bit(b: Bool, shift: Int) -> Int
+    if b
+        1 << shift
+    else
+        0
+
+// The AuthReq octet of section 3.5.1.
+fn auth_req(f: Features) -> Int
+    bit(f.bonding, 0) | bit(f.mitm, 2) | bit(f.secure_connections, 3) | bit(f.keypress, 4) | bit(f.ct2, 5)
+
+// The key distribution octet of section 3.6.1.
+fn key_dist(k: KeyDistribution) -> Int
+    bit(k.enc, 0) | bit(k.id, 1) | bit(k.sign, 2) | bit(k.link, 3)
+
+fn dist_of(v: Int) -> KeyDistribution
+    KeyDistribution { enc: (v & 1) != 0, id: (v & 2) != 0, sign: (v & 4) != 0, link: (v & 8) != 0 }
+
+// The five parameters after the opcode that a Pairing_Request and a
+// Pairing_Response share: IO capability, OOB flag, AuthReq, maximum
+// key size and the two key distribution octets.
+fn push_pairing(var out: [u8], f: Features, io: IoCapability)
+    list.push(out, io_code(io) as u8)
+    list.push(out, bit(f.oob, 0) as u8)
+    list.push(out, auth_req(f) as u8)
+    list.push(out, f.max_key_size as u8)
+    list.push(out, key_dist(f.initiator_keys) as u8)
+    list.push(out, key_dist(f.responder_keys) as u8)
+
+fn io_code(io: IoCapability) -> Int
+    match io
+        DisplayOnly     => 0
+        DisplayYesNo    => 1
+        KeyboardOnly    => 2
+        NoInputNoOutput => 3
+        KeyboardDisplay => 4
+
+fn io_capability(v: Int) -> Result<IoCapability, Failure>
+    if v == 0
+        Ok(DisplayOnly)
+    else if v == 1
+        Ok(DisplayYesNo)
+    else if v == 2
+        Ok(KeyboardOnly)
+    else if v == 3
+        Ok(NoInputNoOutput)
+    else if v == 4
+        Ok(KeyboardDisplay)
+    else
+        Err(InvalidParameters)
+
+// The features a Security_Request carries: only AuthReq travels.
+fn auth_features(a: Int) -> Features
+    Features { bonding: (a & 3) == 1, mitm: (a & 4) != 0, secure_connections: (a & 8) != 0,
+               keypress: (a & 16) != 0, ct2: (a & 32) != 0, oob: false, max_key_size: 16,
+               initiator_keys: dist_of(0), responder_keys: dist_of(0) }
+
+// The features of a Pairing_Request or Pairing_Response whose OOB flag
+// is at offset 2 and whose AuthReq starts at `from - 1`: the bytes are
+// `opcode, IO, OOB, AuthReq, MaxKey, InitKeys, RespKeys`.
+fn read_features(b: [u8], from: Int) -> Result<Features, Failure>
+    let oob = b[2] as Int
+    let key = b[4] as Int
+    if oob > 1
+        Err(InvalidParameters)
+    else if key < 7 or key > 16
+        Err(InvalidParameters)
+    else
+        let a = auth_features(b[from] as Int)
+        Ok(Features { bonding: a.bonding, mitm: a.mitm, secure_connections: a.secure_connections,
+                      keypress: a.keypress, ct2: a.ct2, oob: oob == 1, max_key_size: key,
+                      initiator_keys: dist_of(b[5] as Int), responder_keys: dist_of(b[6] as Int) })
+
+fn failure_code(f: Failure) -> Int
+    match f
+        PasskeyEntryFailed          => 1
+        OobNotAvailable             => 2
+        AuthenticationRequirements  => 3
+        ConfirmValueFailed          => 4
+        PairingNotSupported         => 5
+        EncryptionKeySize           => 6
+        CommandNotSupported         => 7
+        UnspecifiedReason           => 8
+        RepeatedAttempts            => 9
+        InvalidParameters           => 10
+        DhKeyCheckFailed            => 11
+        NumericComparisonFailed     => 12
+        BrEdrPairingInProgress      => 13
+        CrossTransportKeyNotAllowed => 14
+        KeyRejected                 => 15
+
+// A reserved reason code is read as Unspecified Reason, as section
+// 3.5.5 says.
+fn failure_of(v: Int) -> Failure
+    if v == 1
+        PasskeyEntryFailed
+    else if v == 2
+        OobNotAvailable
+    else if v == 3
+        AuthenticationRequirements
+    else if v == 4
+        ConfirmValueFailed
+    else if v == 5
+        PairingNotSupported
+    else if v == 6
+        EncryptionKeySize
+    else if v == 7
+        CommandNotSupported
+    else if v == 9
+        RepeatedAttempts
+    else if v == 10
+        InvalidParameters
+    else if v == 11
+        DhKeyCheckFailed
+    else if v == 12
+        NumericComparisonFailed
+    else if v == 13
+        BrEdrPairingInProgress
+    else if v == 14
+        CrossTransportKeyNotAllowed
+    else if v == 15
+        KeyRejected
+    else
+        UnspecifiedReason

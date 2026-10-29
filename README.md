@@ -11,11 +11,12 @@ that [l2cap-nv](https://novo-lang.org/packages/l2cap-nv) provides.
 next channel along, and it is what most of the encryption this package
 arranges is for.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
+**Status: partly implemented.** The toolbox, the fourteen packets with
+their encoder and decoder, and the failure messages work and are
+verified. The state machine (`new`, `begin`, `feed` and the rest) is
+declared and its bodies are `todo()`, because it cannot be written
+against the current signatures; "What is not implemented" says why.
+The package stays `draft` at 0.0.x until it is.
 
 ## What the Security Manager is
 
@@ -228,22 +229,16 @@ outside a pairing, such as resolving a private address with `ah`.
 
 novo-lang lets a package state which of its modules can run on a device
 with no heap allocator, and the compiler checks that claim on every
-build. `tests/embedded_probe.nv` is that claim as a program that either
-builds or does not.
+build. The device claim is not made today.
 
-**It does not build, and this package cannot be called from a device
-today.** Every function in `toolbox` takes and returns `[u8]`, which is
-a heap list, and the embedded tier allows no heap allocation. There is
-no way to construct an argument for one of them there.
-
-The fix is a change to these signatures rather than to the probe. Every
-value the toolbox handles is fixed-width: 16 bytes for a block, 32 for a
-public-key coordinate, 7 for an address, 3 for a prand.
-[crypto-nv](https://novo-lang.org/packages/crypto-nv) is the published
-package that runs on a device and keeps doing so, and it manages it with
-a `@value` struct holding a true inline array, which lives on the
-caller's stack with no heap cell. Version 0.1.0 is where those signatures change.
-That is what a `0.0.x` release is for.
+Every function in `toolbox` takes and returns `[u8]`, which is a heap
+list, and the embedded tier allows no heap allocation, so this package
+cannot be called from a device. The fix is a change to these signatures:
+every value the toolbox handles is fixed-width, 16 bytes for a block, 32
+for a public-key coordinate, 7 for an address, 3 for a prand, and
+[crypto-nv](https://novo-lang.org/packages/crypto-nv) shows the shape
+that runs on a device, a `@value` struct holding a true inline array.
+That belongs with the state machine's redesign.
 
 ## What is not included
 
@@ -276,8 +271,6 @@ That is what a `0.0.x` release is for.
   0x0004. It reads and writes a peer's attributes, and its permission
   check is told whether the link is encrypted and authenticated, which
   is what this package arranges.
-- [crypto-nv](https://novo-lang.org/packages/crypto-nv) is AES-128 and
-  AES-CMAC, which every function in `toolbox` is a composition of.
 - [p256-nv](https://novo-lang.org/packages/p256-nv) is the curve behind
   LE Secure Connections. Its `PublicKey` is the one type of another
   package in this one's surface.
@@ -303,22 +296,52 @@ the specification says comes next. A host driving this package should
 never have to know anything the protocol did not tell it, and that is
 the property these tests are written to catch.
 
-The tests compile today and fail at run, each on the `not implemented`
-panic that is its body. That is the expected state of an interface
-release. They turn green in the order an implementation would want them
-to, as bodies land.
+`tests/smp_toolbox_tests.nv` holds the specification's own Appendix D
+vectors (D.2 to D.8) and the section 2.2.3 and 2.2.4 samples for `c1` and
+`s1`, and 275 random rows computed with AES-128 and AES-CMAC from
+OpenSSL (the Python `cryptography` package) by
+`tests/generate/gen_toolbox.py`, which asserts the Appendix D vectors
+against its own formulas before it writes a row.
+`tests/smp_pdu_tests.nv` decodes and re-encodes the two PDUs the
+specification prints in its section 2.2.3 sample, round-trips all
+fourteen opcodes, and checks every length, IO capability, OOB flag, key
+size and reserved failure code the codec refuses or reads specially.
+`tests/smp_tests.nv` asserts the state machine and is red until it is
+written.
+
+## What is not implemented
+
+The state machine. Writing it against the current interface is not
+possible, and the interface is the thing to decide:
+
+- `new(role, features, io_caps)` takes no addresses, and `c1`, `f5`
+  and `f6` all take the initiator's and responder's address and address
+  type. A pairing cannot compute one confirm value without them.
+- Nothing carries the keys a side offers to distribute: `Features`
+  says which kinds (`KeyDistribution`) and not the values. The LTK,
+  EDIV and Rand are drawn from the entropy the host feeds in, but the
+  IRK, the identity address and the CSRK are the device's own.
+- Passkey Entry and Out of Band need the passkey and the OOB data as
+  inputs; `UserResponse.Passkey` covers the first and nothing covers
+  the second.
+- `Smp` is `struct Smp { tag: Int }`, a placeholder with no room for a
+  role, two sets of features, a key pair, two nonces and a key.
+
+Each is a signature change, which a `0.0.x` release allows, but the
+shape (a `Link` value passed to `new`? an `Identity` value?) is a
+design decision for the package's owner, not an implementation detail.
 
 ## Implementation status
 
 | Item | Implemented |
 | --- | --- |
 | `smp.CID` | yes (it is a constant) |
-| `smp.new`, `.begin`, `.feed`, `.feed_random`, `.feed_user`, `.feed_link_encrypted`, `.abort` | no |
-| `smp.state`, `.method`, `.is_authenticated`, `.peer_public_key` | no |
-| `smp.encode_pdu`, `.decode_pdu`, `.pdu_opcode` | no |
-| `smp.Failure.message` | no |
-| `toolbox.c1`, `.build_c1_p1`, `.build_c1_p2`, `.s1`, `.ah` | no |
-| `toolbox.f4`, `.f5_mackey`, `.f5_ltk`, `.f6`, `.g2`, `.h6`, `.h7` | no |
+| `smp.new`, `.begin`, `.feed`, `.feed_random`, `.feed_user`, `.feed_link_encrypted`, `.abort` | no, see above |
+| `smp.state`, `.method`, `.is_authenticated`, `.peer_public_key` | no, see above |
+| `smp.encode_pdu`, `.decode_pdu`, `.pdu_opcode` | yes |
+| `smp.Failure.message` | yes |
+| `toolbox.c1`, `.build_c1_p1`, `.build_c1_p2`, `.s1`, `.ah` | yes |
+| `toolbox.f4`, `.f5_mackey`, `.f5_ltk`, `.f6`, `.g2`, `.h6`, `.h7` | yes |
 
 ## Licence
 

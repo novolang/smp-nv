@@ -1,0 +1,168 @@
+// smpcmac.nv — AES-CMAC (RFC 4493).
+//
+// CMAC is a NIST-approved keyed message authentication mode built
+// on AES-128.  BLE SMP's f4 / f5 / f6 / g2 / s1 toolbox functions
+// are all expressed as AES-CMAC over various input shapes
+// (Vol 3 Part H §2.2.4-2.2.8), so every one of them bottoms out
+// here — a defect in this file is a defect in all of them.
+//
+// RFC 4493 §2:
+//
+//   1. Derive subkeys K1, K2 from K:
+//        L  = AES_K(0^128)
+//        K1 = (L << 1)  if MSB(L) == 0
+//             (L << 1) XOR Rb  otherwise   (Rb = 0x...87)
+//        K2 = derived from K1 the same way.
+//
+//   2. Pad message M into n 128-bit blocks.  Last block:
+//        if |M| is a non-zero multiple of 16 → M_last = M_n XOR K1
+//        else                                → M_last = (M_n || 1 || 0..0) XOR K2
+//
+//   3. Chain AES_K through M_1 .. M_{n-1}, then T = AES_K(X XOR M_last).
+//
+// The 16-byte MAC T is the output.
+//
+// All byte-level operations live in this module; AES-128 is
+// imported from the sibling `smpaes` module.
+
+use smpaes
+
+// ── Constants ───────────────────────────────────────────────────────
+
+const RB_LAST_BYTE = 0x87  // Rb = 0x000...0087, only low byte is nonzero.
+
+const CMAC_BLOCK_SIZE = 16
+
+// ── Helpers: 16-byte block operations ──────────────────────────────
+
+// Left-shift a 16-byte block by 1 bit, big-endian (byte 0 = MSB).
+fn block_shl1(b: [u8]) -> [u8]
+    var out: [u8] = []
+    for i in 0..15
+        let cur = b[i] as Int
+        let nxt = b[i + 1] as Int
+        let v = ((cur << 1) & 0xFF) | ((nxt >>> 7) & 0x01)
+        out = list.append(out, [v as u8])
+    let last = (b[15] as Int << 1) & 0xFF
+    out = list.append(out, [last as u8])
+    out
+
+// XOR two 16-byte blocks.
+fn block_xor(a: [u8], b: [u8]) -> [u8]
+    var out: [u8] = []
+    for i in 0..16
+        out = list.append(out, [(a[i] as Int ^ b[i] as Int) as u8])
+    out
+
+// XOR a 16-byte block with a single byte at the *low* end (byte 15).
+fn block_xor_low_byte(a: [u8], byte_val: Int) -> [u8]
+    var out: [u8] = []
+    for i in 0..15
+        out = list.append(out, [a[i]])
+    out = list.append(out, [(a[15] as Int ^ byte_val) as u8])
+    out
+
+// Derive subkey K_next from previous subkey:
+//   K_next = (prev << 1) XOR Rb  if MSB(prev) was 1
+//          = (prev << 1)         otherwise
+fn derive_next_subkey(prev: [u8]) -> [u8]
+    let msb = prev[0] as Int & 0x80
+    let shifted = block_shl1(prev)
+    if msb != 0
+        block_xor_low_byte(shifted, RB_LAST_BYTE)
+    else
+        shifted
+
+// All-zero 16-byte block.  Used as the AES input for subkey gen.
+fn zero_block() -> [u8]
+    [
+        0 as u8, 0 as u8, 0 as u8, 0 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8,
+        0 as u8, 0 as u8, 0 as u8, 0 as u8]
+
+// ── Subkey generation (RFC 4493 §2.3) ───────────────────────────────
+
+// Generate K1 — first subkey.
+fn cmac_gen_k1(key: [u8]) -> [u8]
+    let l = smpaes.aes128_encrypt(zero_block(), key)
+    derive_next_subkey(l)
+
+// Generate K2 — second subkey, derived from K1.
+fn cmac_gen_k2(key: [u8]) -> [u8]
+    let k1 = cmac_gen_k1(key)
+    derive_next_subkey(k1)
+
+// ── Padding (RFC 4493 §2.4 step 4) ──────────────────────────────────
+//
+// `last_block` is the trailing partial bytes of M (length 0..15).
+// Append 0x80 then zero-fill to 16 bytes.
+fn cmac_pad_last(last_block: [u8]) -> [u8]
+    let r = list.len(last_block)
+    var out: [u8] = []
+    for i in 0..16
+        if i < r
+            out = list.append(out, [last_block[i]])
+        else if i == r
+            out = list.append(out, [0x80 as u8])
+        else
+            out = list.append(out, [0 as u8])
+    out
+
+// Extract bytes [start..start+16) from a longer message.  Caller
+// guarantees the indices are in range.
+fn extract_block(msg: [u8], start: Int) -> [u8]
+    var out: [u8] = []
+    for i in 0..16
+        out = list.append(out, [msg[start + i]])
+    out
+
+// Extract the trailing partial block when |M| isn't a multiple of 16.
+fn extract_tail(msg: [u8], start: Int, len: Int) -> [u8]
+    var out: [u8] = []
+    for i in 0..len
+        out = list.append(out, [msg[start + i]])
+    out
+
+// ── Top-level MAC ──────────────────────────────────────────────────
+//
+// AES-CMAC over an arbitrary-length message.  Returns the 16-byte
+// tag.  Empty messages are valid (last_block path with 0 < r = 0;
+// padding produces 0x80 0x00...0x00 XOR K2).
+pub fn aes_cmac(key: [u8], msg: [u8]) -> [u8]
+    let mlen = list.len(msg)
+    let k1 = cmac_gen_k1(key)
+    let k2 = cmac_gen_k2(key)
+
+    // n = number of blocks.  If mlen == 0, treat n = 1 (and use K2 path).
+    var n = 1
+    var last_full_aligned = false
+    if mlen != 0
+        if mlen / CMAC_BLOCK_SIZE * CMAC_BLOCK_SIZE == mlen
+            n = mlen / CMAC_BLOCK_SIZE
+            last_full_aligned = true
+        else
+            n = mlen / CMAC_BLOCK_SIZE + 1
+            last_full_aligned = false
+
+    // Build M_last.
+    var m_last = zero_block()
+    if last_full_aligned
+        m_last = block_xor(extract_block(msg, (n - 1) * CMAC_BLOCK_SIZE), k1)
+    else
+        var tail_len = 0
+        if mlen != 0
+            tail_len = mlen - (n - 1) * CMAC_BLOCK_SIZE
+        let tail = extract_tail(msg, (n - 1) * CMAC_BLOCK_SIZE, tail_len)
+        m_last = block_xor(cmac_pad_last(tail), k2)
+
+    // Chain AES_K through blocks 1 .. n-1.
+    var x = zero_block()
+    var i = 0
+    while i < n - 1
+        let m_i = extract_block(msg, i * CMAC_BLOCK_SIZE)
+        x = smpaes.aes128_encrypt(block_xor(x, m_i), key)
+        i = i + 1
+
+    // Final block.
+    smpaes.aes128_encrypt(block_xor(x, m_last), key)

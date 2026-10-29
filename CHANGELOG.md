@@ -4,6 +4,45 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.0.7 — 2026-10-29
+
+The toolbox, the packet codec and the failure messages have bodies. The
+state machine does not, and the package stays `draft` at 0.0.x. No
+signature changed.
+
+### Added
+
+- `toolbox.c1`, `build_c1_p1`, `build_c1_p2`, `s1`, `ah`, `f4`,
+  `f5_mackey`, `f5_ltk`, `f6`, `g2`, `h6` and `h7`, over a software
+  AES-128 (`src/smpaes.nv`, FIPS 197) and AES-CMAC (`src/smpcmac.nv`,
+  RFC 4493) that this package now carries, ported from
+  `orbit/crypto-ble-ecc`. Verified against Appendix D.2 to D.8, the
+  section 2.2.3 and 2.2.4 samples, and 275 rows computed with OpenSSL.
+- `smp.encode_pdu`, `decode_pdu`, `pdu_opcode` and `Failure.message`.
+  PDU byte fields hold the wire bytes unchanged (least significant
+  octet first for the 128-bit values and the public key coordinates);
+  the toolbox takes the specification's printed order, so the state
+  machine reverses between the two.
+- `tests/smp_toolbox_tests.nv`, `tests/smp_pdu_tests.nv` and the
+  generator in `tests/generate/`.
+
+### Changed
+
+- The dependency on crypto-nv is gone: nothing here hashes, and the AES
+  and CMAC it was meant to supply are not in it.
+- The dependency on p256-nv is a path while p256-nv 0.1.0 is not on the
+  registry; it becomes `p256-nv = "^0.1"` at publish.
+- The embedded probe is removed: the toolbox takes and returns byte
+  lists, which the embedded tier does not admit.
+
+### Not done
+
+- The state machine: `new`, `begin`, `feed`, `feed_random`, `feed_user`,
+  `feed_link_encrypted`, `abort`, `state`, `method`, `is_authenticated`
+  and `peer_public_key`. The README's "What is not implemented" lists
+  the four missing inputs that make the current signatures
+  insufficient.
+
 ## 0.0.5 — 2026-09-25
 
 The package builds with novo 0.11.  Every body is still `todo()`.

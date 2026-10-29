@@ -1,0 +1,238 @@
+// smpaes.nv — pure-software AES-128, encrypt only.
+//
+// FIPS 197 (Advanced Encryption Standard) Appendix C.1.  128-bit
+// key, 128-bit block, 10 rounds.  Encrypt-only — BLE SMP / CCM
+// only ever chain AES forward, decrypt is dead code on this path.
+//
+// State is a 4×4 matrix of bytes laid out column-major:
+//
+//     s0 s4 s8  s12
+//     s1 s5 s9  s13
+//     s2 s6 s10 s14
+//     s3 s7 s11 s15
+//
+// Encrypt sequence (FIPS 197 §5.1):
+//   1. AddRoundKey(state, round_keys[0..15])
+//   2. for r in 1..9:
+//        SubBytes; ShiftRows; MixColumns; AddRoundKey(state, round_keys[16r..16r+15])
+//   3. SubBytes; ShiftRows; AddRoundKey(state, round_keys[160..175])
+//
+// All byte arithmetic is in GF(2^8) with reduction polynomial
+// 0x11B (FIPS 197 §4.2).  xtime + log/exp tables would be faster
+// than the inline xtime in MixColumns, but byte-level adds and
+// shifts are already plenty cheap for SMP frame rates.
+
+// ── S-box (FIPS 197 Figure 7) — forward AES SubBytes table ─────────
+//
+// 256 entries.  Stored as Int because Novo's @tier(embedded) gap
+// note flags that `list.get` on typed [u8] lists returns ptr —
+// using [Int] sidesteps it for lookup tables.
+const S_BOX = [
+    0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
+    0xCA, 0x82, 0xC9, 0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0,
+    0xB7, 0xFD, 0x93, 0x26, 0x36, 0x3F, 0xF7, 0xCC, 0x34, 0xA5, 0xE5, 0xF1, 0x71, 0xD8, 0x31, 0x15,
+    0x04, 0xC7, 0x23, 0xC3, 0x18, 0x96, 0x05, 0x9A, 0x07, 0x12, 0x80, 0xE2, 0xEB, 0x27, 0xB2, 0x75,
+    0x09, 0x83, 0x2C, 0x1A, 0x1B, 0x6E, 0x5A, 0xA0, 0x52, 0x3B, 0xD6, 0xB3, 0x29, 0xE3, 0x2F, 0x84,
+    0x53, 0xD1, 0x00, 0xED, 0x20, 0xFC, 0xB1, 0x5B, 0x6A, 0xCB, 0xBE, 0x39, 0x4A, 0x4C, 0x58, 0xCF,
+    0xD0, 0xEF, 0xAA, 0xFB, 0x43, 0x4D, 0x33, 0x85, 0x45, 0xF9, 0x02, 0x7F, 0x50, 0x3C, 0x9F, 0xA8,
+    0x51, 0xA3, 0x40, 0x8F, 0x92, 0x9D, 0x38, 0xF5, 0xBC, 0xB6, 0xDA, 0x21, 0x10, 0xFF, 0xF3, 0xD2,
+    0xCD, 0x0C, 0x13, 0xEC, 0x5F, 0x97, 0x44, 0x17, 0xC4, 0xA7, 0x7E, 0x3D, 0x64, 0x5D, 0x19, 0x73,
+    0x60, 0x81, 0x4F, 0xDC, 0x22, 0x2A, 0x90, 0x88, 0x46, 0xEE, 0xB8, 0x14, 0xDE, 0x5E, 0x0B, 0xDB,
+    0xE0, 0x32, 0x3A, 0x0A, 0x49, 0x06, 0x24, 0x5C, 0xC2, 0xD3, 0xAC, 0x62, 0x91, 0x95, 0xE4, 0x79,
+    0xE7, 0xC8, 0x37, 0x6D, 0x8D, 0xD5, 0x4E, 0xA9, 0x6C, 0x56, 0xF4, 0xEA, 0x65, 0x7A, 0xAE, 0x08,
+    0xBA, 0x78, 0x25, 0x2E, 0x1C, 0xA6, 0xB4, 0xC6, 0xE8, 0xDD, 0x74, 0x1F, 0x4B, 0xBD, 0x8B, 0x8A,
+    0x70, 0x3E, 0xB5, 0x66, 0x48, 0x03, 0xF6, 0x0E, 0x61, 0x35, 0x57, 0xB9, 0x86, 0xC1, 0x1D, 0x9E,
+    0xE1, 0xF8, 0x98, 0x11, 0x69, 0xD9, 0x8E, 0x94, 0x9B, 0x1E, 0x87, 0xE9, 0xCE, 0x55, 0x28, 0xDF,
+    0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42, 0x68, 0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16]
+
+// ── Rcon (FIPS 197 §5.2) — round constants for key expansion ────────
+//
+// Rcon[i] = (rc[i], 0, 0, 0) where rc[1] = 0x01 and
+// rc[i+1] = xtime(rc[i]).  AES-128 uses Rcon[1..10].
+// Index 0 is unused; we keep the slot for 1-indexed access.
+const R_CON = [
+    0x00,
+    0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36]
+
+// ── GF(2^8) primitives ──────────────────────────────────────────────
+
+// xtime(b) = b · x mod (x^8 + x^4 + x^3 + x + 1).  AES MixColumns
+// uses this to multiply a byte by the constant {02} in the field.
+fn xtime(b: Int) -> Int
+    let shifted = (b << 1) & 0xFF
+    if (b & 0x80) != 0
+        shifted ^ 0x1B
+    else
+        shifted
+
+// gmul(a, b) — full GF(2^8) multiplication.  MixColumns only needs
+// {01, 02, 03} as multipliers, so callers usually inline xtime;
+// gmul is here for completeness + the @test functions.
+fn gmul(a: Int, b: Int) -> Int
+    var acc = 0
+    var aa = a
+    var bb = b
+    for i in 0..8
+        if (bb & 1) != 0
+            acc = acc ^ aa
+        aa = xtime(aa)
+        bb = bb >>> 1
+    acc & 0xFF
+
+// ── Key schedule ────────────────────────────────────────────────────
+//
+// Expand 16 bytes of key into 176 bytes of round keys (11 × 16).
+// FIPS 197 §5.2:
+//
+//   w[0..3]   = key bytes packed as 4-byte words
+//   w[i] = w[i-1]                                   if i mod 4 != 0
+//   w[i] = w[i-4] XOR SubWord(RotWord(w[i-1])) XOR Rcon[i/4]
+//                                                  if i mod 4 == 0
+//
+// We unfold to a flat 176-byte list rather than packing into u32
+// words — bytewise XOR is identical and the @test functions can
+// index any output byte directly.
+
+fn aes128_key_expansion(key: [u8]) -> [Int]
+    var rk: [Int] = []
+    // Round-0 = the key itself.
+    for i in 0..16
+        rk = list.append(rk, [key[i] as Int])
+    // Round 1..10 = derived.  Each round adds 16 bytes; produced
+    // from the previous round and an Rcon byte.
+    for round in 1..11
+        // First word of this round = previous-round-last-word XOR
+        // SubWord(RotWord(prev_last)) XOR (Rcon[round], 0, 0, 0).
+        let p0 = rk[(round - 1) * 16 + 12]
+        let p1 = rk[(round - 1) * 16 + 13]
+        let p2 = rk[(round - 1) * 16 + 14]
+        let p3 = rk[(round - 1) * 16 + 15]
+        // RotWord: (b0, b1, b2, b3) → (b1, b2, b3, b0).
+        // SubWord: apply S-box to each byte.
+        let s0 = S_BOX[p1]
+        let s1 = S_BOX[p2]
+        let s2 = S_BOX[p3]
+        let s3 = S_BOX[p0]
+        // First word of the new round = w[round*4-4] XOR (s0..s3) XOR (Rcon, 0, 0, 0).
+        let w0 = rk[(round - 1) * 16 + 0] ^ s0 ^ R_CON[round]
+        let w1 = rk[(round - 1) * 16 + 1] ^ s1
+        let w2 = rk[(round - 1) * 16 + 2] ^ s2
+        let w3 = rk[(round - 1) * 16 + 3] ^ s3
+        rk = list.append(rk, [w0, w1, w2, w3])
+        // Subsequent three words: w[i] = w[i-4] XOR w[i-1].
+        var j = 1
+        while j < 4
+            let base = (round - 1) * 16 + j * 4
+            let prev0 = rk[round * 16 + (j - 1) * 4 + 0]
+            let prev1 = rk[round * 16 + (j - 1) * 4 + 1]
+            let prev2 = rk[round * 16 + (j - 1) * 4 + 2]
+            let prev3 = rk[round * 16 + (j - 1) * 4 + 3]
+            let n0 = rk[base + 0] ^ prev0
+            let n1 = rk[base + 1] ^ prev1
+            let n2 = rk[base + 2] ^ prev2
+            let n3 = rk[base + 3] ^ prev3
+            rk = list.append(rk, [n0, n1, n2, n3])
+            j = j + 1
+    rk
+
+// ── Round operations (state ∈ [Int]) ────────────────────────────────
+
+fn add_round_key(state: [Int], rk: [Int], offset: Int) -> [Int]
+    [
+        state[0] ^ rk[offset + 0],
+        state[1] ^ rk[offset + 1],
+        state[2] ^ rk[offset + 2],
+        state[3] ^ rk[offset + 3],
+        state[4] ^ rk[offset + 4],
+        state[5] ^ rk[offset + 5],
+        state[6] ^ rk[offset + 6],
+        state[7] ^ rk[offset + 7],
+        state[8] ^ rk[offset + 8],
+        state[9] ^ rk[offset + 9],
+        state[10] ^ rk[offset + 10],
+        state[11] ^ rk[offset + 11],
+        state[12] ^ rk[offset + 12],
+        state[13] ^ rk[offset + 13],
+        state[14] ^ rk[offset + 14],
+        state[15] ^ rk[offset + 15]]
+
+fn sub_bytes(state: [Int]) -> [Int]
+    [
+        S_BOX[state[0]], S_BOX[state[1]], S_BOX[state[2]], S_BOX[state[3]],
+        S_BOX[state[4]], S_BOX[state[5]], S_BOX[state[6]], S_BOX[state[7]],
+        S_BOX[state[8]], S_BOX[state[9]], S_BOX[state[10]], S_BOX[state[11]],
+        S_BOX[state[12]], S_BOX[state[13]], S_BOX[state[14]], S_BOX[state[15]]]
+
+// ShiftRows — FIPS 197 §5.1.2.  Column-major layout means rows
+// are stride-4 inside the 16-element list:
+//
+//   row 0: indices 0, 4, 8,  12   (no shift)
+//   row 1: indices 1, 5, 9,  13   (shift 1 left)
+//   row 2: indices 2, 6, 10, 14   (shift 2 left)
+//   row 3: indices 3, 7, 11, 15   (shift 3 left)
+fn shift_rows(state: [Int]) -> [Int]
+    [
+        state[0], state[5], state[10], state[15],
+        state[4], state[9], state[14], state[3],
+        state[8], state[13], state[2], state[7],
+        state[12], state[1], state[6], state[11]]
+
+// MixColumns — FIPS 197 §5.1.3.  Each column treated as a
+// polynomial, multiplied by 3x³ + x² + x + 2 mod (x^4 + 1):
+//
+//   c0' = 2·c0 ⊕ 3·c1 ⊕   c2 ⊕   c3
+//   c1' =   c0 ⊕ 2·c1 ⊕ 3·c2 ⊕   c3
+//   c2' =   c0 ⊕   c1 ⊕ 2·c2 ⊕ 3·c3
+//   c3' = 3·c0 ⊕   c1 ⊕   c2 ⊕ 2·c3
+//
+// 3·b = xtime(b) ⊕ b.
+fn mix_columns(state: [Int]) -> [Int]
+    var out: [Int] = []
+    for col in 0..4
+        let b = col * 4
+        let c0 = state[b + 0]
+        let c1 = state[b + 1]
+        let c2 = state[b + 2]
+        let c3 = state[b + 3]
+        let n0 = xtime(c0) ^ (xtime(c1) ^ c1) ^ c2 ^ c3
+        let n1 = c0 ^ xtime(c1) ^ (xtime(c2) ^ c2) ^ c3
+        let n2 = c0 ^ c1 ^ xtime(c2) ^ (xtime(c3) ^ c3)
+        let n3 = xtime(c0) ^ c0 ^ c1 ^ c2 ^ xtime(c3)
+        out = list.append(out, [n0, n1, n2, n3])
+    out
+
+// ── Top-level encrypt ────────────────────────────────────────────────
+
+// aes128_encrypt(plaintext: [u8; 16], key: [u8; 16]) -> [u8; 16]
+//
+// Returns the ciphertext as a 16-byte [u8] list.  Caller passes
+// raw bytes; we promote to [Int] for round arithmetic and demote
+// back at the API boundary.
+pub fn aes128_encrypt(plaintext: [u8], key: [u8]) -> [u8]
+    // Promote plaintext to [Int].
+    var state: [Int] = []
+    for i in 0..16
+        state = list.append(state, [plaintext[i] as Int])
+
+    let rk = aes128_key_expansion(key)
+
+    // Round 0: AddRoundKey only.
+    state = add_round_key(state, rk, 0)
+
+    // Rounds 1..9: full mix.
+    for round in 1..10
+        state = sub_bytes(state)
+        state = shift_rows(state)
+        state = mix_columns(state)
+        state = add_round_key(state, rk, round * 16)
+
+    // Round 10: no MixColumns.
+    state = sub_bytes(state)
+    state = shift_rows(state)
+    state = add_round_key(state, rk, 160)
+
+    // Demote back to [u8].
+    var out: [u8] = []
+    for j in 0..16
+        out = list.append(out, [state[j] as u8])
+    out
