@@ -1,6 +1,6 @@
 [package]
 name        = "smp-nv"
-version     = "0.0.7"
+version     = "0.0.8"
 description = "The Bluetooth Security Manager Protocol as a state machine that performs nothing: feed it PDUs, entropy and a person's answer, and it returns the actions a host must take.  LE Legacy and LE Secure Connections, the pairing toolbox, and key distribution.  The toolbox and the packet codec work; the state machine is not written."
 license     = "Apache-2.0"
 
@@ -27,6 +27,9 @@ novo        = ">= 0.22.0"
 [dependencies]
 # The curve, for LE Secure Connections: a local key pair from the
 # entropy the host feeds in, and the ECDH that turns the peer's public
-# key into the DHKey f5 consumes.  A path dependency until both
-# packages have their own repositories.
-p256-nv = { path = "../p256-nv" }
+# key into the DHKey f5 consumes.
+p256-nv = "^0.1.0"
+
+[withdrawn]
+replaced_by = "ble-codec-nv"
+reason      = "The SMP PDU codec moved into ble-codec-nv, the pairing functions into crypto-ble-ecc and the pairing state machine into noble."

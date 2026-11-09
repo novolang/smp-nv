@@ -4,6 +4,11 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.0.8 — 2026-11-09
+
+Withdrawn: The SMP PDU codec moved into ble-codec-nv, the pairing functions into crypto-ble-ecc and the pairing state machine into noble.  `novo pkg add smp-nv` now refuses and names `ble-codec-nv`; a project that already depends on this
+package keeps building.  No source changed.
+
 ## 0.0.7 — 2026-10-29
 
 The toolbox, the packet codec and the failure messages have bodies. The

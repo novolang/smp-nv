@@ -3,10 +3,13 @@
 [crypto-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.1"
-version = "0.1.7"
-hash = "c379e61661ab8e15a2058253f86c6f86d31b697ff1c0f060c176ea30dd45c4c5"
+req = "^0.1.8"
+version = "0.1.8"
+hash = "be5d7c09a9d2ff2e27c04ba7a4e622571727ea1ba2579c4a5e9a4a041f320177"
 
 [p256-nv]
-source = "path"
-path = "../p256-nv"
+source = "registry"
+url = "https://registry.novo-lang.org"
+req = "^0.1.0"
+version = "0.1.1"
+hash = "dcd12e75e47e70fdd3be9e5649bdc5c30553c0877eaa88de87b31b9efde36c85"
